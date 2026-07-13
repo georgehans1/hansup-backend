@@ -574,6 +574,10 @@ export function friendLeaderboard(store: AppStore, userId: ID, period: Leaderboa
 
 export function createConversation(store: AppStore, creatorId: ID, input: { kind: "direct" | "group"; title?: string; memberIds: ID[] }): Conversation {
   const members = unique([creatorId, ...input.memberIds]);
+  if (input.kind === "direct" && members.length === 2) {
+    const existing = store.conversations.find((conversation) => conversation.kind === "direct" && members.every((id) => store.conversationMembers.some((member) => member.conversationId === conversation.id && member.userId === id)));
+    if (existing) return existing;
+  }
   for (const memberId of members) {
     if (memberId !== creatorId && friendshipStatus(store, creatorId, memberId) !== "accepted") {
       throw new Error("Conversations can only include friends");
@@ -699,6 +703,10 @@ export function addChallenge(store: AppStore, challenge: Omit<Challenge, "id" | 
     createdAt: new Date().toISOString()
   };
   store.challenges.push(saved);
+  if (saved.sharedConversationId) {
+    requireMember(store, challenge.creatorId, saved.sharedConversationId);
+    store.messages.push(systemMessage(`message_challenge_invite_${saved.id}`, saved.sharedConversationId, `Challenge invite: ${saved.title}. Open Challenges to accept and track progress.`, new Date().toISOString()));
+  }
   refreshChallenge(store, saved);
   return saved;
 }
@@ -881,6 +889,32 @@ export function refreshAllChallenges(store: AppStore): ID[] {
     const previous = JSON.stringify({ status: challenge.status, participants: challenge.participants });
     refreshChallenge(store, challenge);
     if (previous !== JSON.stringify({ status: challenge.status, participants: challenge.participants })) changed.push(challenge.id);
+  }
+  return changed;
+}
+
+export function addDailyGroupChallengeUpdates(store: AppStore, now = new Date()): ID[] {
+  const updateDate = new Date(now);
+  updateDate.setUTCDate(updateDate.getUTCDate() - 1);
+  const localDate = updateDate.toISOString().slice(0, 10);
+  const changed: ID[] = [];
+
+  for (const challenge of store.challenges) {
+    if (!challenge.sharedConversationId || localDate < challenge.startsOn || localDate > challenge.endsOn) continue;
+    const messageId = `message_challenge_daily_${challenge.id}_${localDate}`;
+    if (store.messages.some((message) => message.id === messageId)) continue;
+    refreshChallenge(store, challenge);
+    const ranking = challenge.participants
+      .filter((participant) => participant.accepted)
+      .sort((left, right) => right.score - left.score)
+      .map((participant, index) => {
+        const name = store.users.find((user) => user.id === participant.userId)?.displayName ?? "Member";
+        return `${index + 1}. ${name}: ${Math.round(participant.score).toLocaleString("en-US")}`;
+      })
+      .join(" | ");
+    const body = `${challenge.title} progress for ${localDate}: ${ranking || "No activity recorded yet."}`;
+    store.messages.push(systemMessage(messageId, challenge.sharedConversationId, body, now.toISOString()));
+    changed.push(challenge.id);
   }
   return changed;
 }
