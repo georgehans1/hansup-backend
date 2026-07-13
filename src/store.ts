@@ -373,6 +373,26 @@ export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset
       : workout);
 }
 
+export function workoutForViewer(store: AppStore, viewerId: ID, workoutId: ID) {
+  const workout = store.workouts.find((item) => item.id === workoutId);
+  if (!workout) throw new Error("Activity not found");
+  if (workout.userId === viewerId) return workout;
+  if (friendshipStatus(store, viewerId, workout.userId) !== "accepted") throw new Error("Activity not available");
+  const privacy = store.settings.find((item) => item.userId === workout.userId);
+  if (privacy?.hideActivityFromFriends) throw new Error("Activity not available");
+  return privacy?.hideExactNumbers ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;
+}
+
+export function summaryForViewer(store: AppStore, viewerId: ID, summaryId: ID) {
+  const summary = store.summaries.find((item) => item.id === summaryId);
+  if (!summary) throw new Error("Activity not found");
+  if (summary.userId === viewerId) return summary;
+  if (friendshipStatus(store, viewerId, summary.userId) !== "accepted") throw new Error("Activity not available");
+  const privacy = store.settings.find((item) => item.userId === summary.userId);
+  if (privacy?.hideActivityFromFriends || privacy?.hideExactNumbers) throw new Error("Activity details are private");
+  return summary;
+}
+
 export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
   const allowed = new Set(["walking", "running", "strengthTraining"]);
   const now = new Date().toISOString();
@@ -826,7 +846,12 @@ export function deleteNotification(store: AppStore, userId: ID, notificationId: 
 
 function notify(store: AppStore, input: Omit<AppNotification, "id" | "metadata" | "createdAt"> & { metadata?: Record<string, unknown> }) {
   if (store.notifications.some((item) => item.deduplicationKey === input.deduplicationKey)) return;
-  store.notifications.push({ ...input, id: `notification_${Date.now()}_${store.notifications.length + 1}`, metadata: input.metadata ?? {}, createdAt: new Date().toISOString() });
+  const metadata = {
+    destinationType: input.entityType ?? input.type,
+    ...(input.entityId ? { destinationId: input.entityId } : {}),
+    ...(input.metadata ?? {})
+  };
+  store.notifications.push({ ...input, id: `notification_${Date.now()}_${store.notifications.length + 1}`, metadata, createdAt: new Date().toISOString() });
 }
 
 function displayName(store: AppStore, userId: ID) { return store.users.find((user) => user.id === userId)?.displayName ?? "A friend"; }

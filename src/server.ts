@@ -58,7 +58,9 @@ import {
   upsertSummary,
   upsertSummaries,
   upsertWorkouts,
-  weeklyRecapFor
+  weeklyRecapFor,
+  workoutForViewer,
+  summaryForViewer
 } from "./store.js";
 import { LeaderboardPeriod } from "./domain.js";
 import { sendApnsPush } from "./apns.js";
@@ -202,6 +204,10 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/activity/workouts") {
         return json(res, 200, activityWorkoutsFor(store, userId, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, type: url.searchParams.get("type") ?? undefined, before: url.searchParams.get("before") ?? undefined, limit: numberParam(url, "limit", 50) }));
       }
+      const workoutDetail = url.pathname.match(/^\/activities\/workouts\/([^/]+)$/);
+      if (req.method === "GET" && workoutDetail) return json(res, 200, workoutForViewer(store, userId, decodeURIComponent(workoutDetail[1])));
+      const summaryDetail = url.pathname.match(/^\/activities\/summaries\/([^/]+)$/);
+      if (req.method === "GET" && summaryDetail) return json(res, 200, summaryForViewer(store, userId, decodeURIComponent(summaryDetail[1])));
       if (req.method === "GET" && url.pathname === "/activity/aggregates") {
         return json(res, 200, activityAggregatesFor(store, userId, numberParam(url, "weeks", 13)));
       }
