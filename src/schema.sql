@@ -66,6 +66,22 @@ CREATE TABLE activity_summaries (
   UNIQUE(user_id, local_date, source)
 );
 
+CREATE TABLE workout_summaries (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  healthkit_uuid text NOT NULL,
+  activity_type text NOT NULL CHECK (activity_type IN ('walking', 'running', 'strengthTraining')),
+  started_at timestamptz NOT NULL,
+  ended_at timestamptz NOT NULL,
+  duration_seconds double precision NOT NULL DEFAULT 0,
+  distance_meters double precision NOT NULL DEFAULT 0,
+  calories double precision NOT NULL DEFAULT 0,
+  source text NOT NULL DEFAULT 'healthkit',
+  trust_level text NOT NULL DEFAULT 'verified',
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(user_id, healthkit_uuid)
+);
+
 CREATE TABLE goals (
   id text PRIMARY KEY,
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,

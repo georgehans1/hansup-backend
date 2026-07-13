@@ -29,19 +29,21 @@ import {
   shareChallenge,
   updateUserSettings,
   upsertSummary,
+  upsertWorkouts,
   weeklyRecapFor
 } from "./store.js";
 import { LeaderboardPeriod } from "./domain.js";
 import { sendApnsPush } from "./apns.js";
 import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
+import type { PersistenceChange } from "./postgres.js";
 
 const demoUserId = "u_ama";
 
 export function createServer(
   store: AppStore = createDemoStore(),
   config: ProductionConfig = productionConfig(),
-  onChange: () => Promise<void> = async () => {}
+  onChange: (change: PersistenceChange) => Promise<void> = async () => {}
 ) {
   return http.createServer(async (req, res) => {
     try {
@@ -60,7 +62,7 @@ export function createServer(
         const payload = await body<{ idToken: string; email?: string; displayName?: string }>(req);
         const identity = await verifyGoogleIdentity({ ...payload, config });
         const result = authWithIdentity(store, identity, config.jwtSecret ?? "demo-secret");
-        await onChange();
+        await onChange({ kind: "auth", userId: result.user.id });
         return json(res, 201, result);
       }
 
@@ -68,7 +70,7 @@ export function createServer(
         const payload = await body<{ code: string; codeVerifier: string; redirectUri: string }>(req);
         const identity = await exchangeGoogleAuthorizationCode({ ...payload, config });
         const result = authWithIdentity(store, identity, config.jwtSecret ?? "demo-secret");
-        await onChange();
+        await onChange({ kind: "auth", userId: result.user.id });
         return json(res, 201, result);
       }
 
@@ -84,7 +86,7 @@ export function createServer(
           email: payload.email ?? "local-test@hansup.dev",
           displayName: payload.displayName ?? "Local Tester"
         }, config.jwtSecret ?? "demo-secret");
-        await onChange();
+        await onChange({ kind: "auth", userId: result.user.id });
         return json(res, 201, result);
       }
 
@@ -102,7 +104,7 @@ export function createServer(
 
       if (req.method === "PATCH" && url.pathname === "/me/settings") {
         const result = updateUserSettings(store, userId, await body(req));
-        await onChange();
+        await onChange({ kind: "settings", userId });
         return json(res, 200, result);
       }
 
@@ -130,7 +132,7 @@ export function createServer(
       if (req.method === "POST" && url.pathname === "/friends/requests") {
         const payload = await body<{ addresseeId: string }>(req);
         const result = sendFriendRequest(store, userId, payload.addresseeId);
-        await onChange();
+        await onChange({ kind: "friendship", friendshipId: result.id });
         return json(res, 201, result);
       }
 
@@ -138,27 +140,34 @@ export function createServer(
       if (req.method === "POST" && friendResponse) {
         const payload = await body<{ accept: boolean }>(req);
         const result = respondFriendRequest(store, friendResponse[1], userId, payload.accept);
-        await onChange();
+        await onChange({ kind: "friendship", friendshipId: result.id });
         return json(res, 200, result);
       }
 
       const friendRemove = url.pathname.match(/^\/friends\/([^/]+)$/);
       if (req.method === "DELETE" && friendRemove) {
         const result = removeFriend(store, userId, friendRemove[1]);
-        await onChange();
+        await onChange({ kind: "friendship-remove", userId, friendId: friendRemove[1] });
         return json(res, 200, result);
       }
 
       const userBlock = url.pathname.match(/^\/users\/([^/]+)\/block$/);
       if (req.method === "POST" && userBlock) {
         const result = blockUser(store, userId, userBlock[1]);
-        await onChange();
+        await onChange({ kind: "block", blockerId: userId, blockedId: userBlock[1] });
         return json(res, 200, result);
       }
 
       if (req.method === "POST" && url.pathname === "/activity/summaries") {
         const result = upsertSummary(store, await body(req));
-        await onChange();
+        await onChange({ kind: "summary", summaryId: result.id, userId: result.userId });
+        return json(res, 201, result);
+      }
+
+      if (req.method === "POST" && url.pathname === "/activity/workouts/batch") {
+        const payload = await body<{ workouts: Parameters<typeof upsertWorkouts>[2] }>(req);
+        const result = upsertWorkouts(store, userId, payload.workouts ?? []);
+        await onChange({ kind: "workouts", workoutIds: result.map((item) => item.id) });
         return json(res, 201, result);
       }
 
@@ -168,7 +177,7 @@ export function createServer(
 
       if (req.method === "POST" && url.pathname === "/goals") {
         const result = addGoal(store, await body(req));
-        await onChange();
+        await onChange({ kind: "goal", goalId: result.id, userId: result.userId });
         return json(res, 201, result);
       }
 
@@ -178,7 +187,7 @@ export function createServer(
 
       if (req.method === "POST" && url.pathname === "/conversations") {
         const result = createConversation(store, userId, await body(req));
-        await onChange();
+        await onChange({ kind: "conversation", conversationId: result.id });
         return json(res, 201, result);
       }
 
@@ -190,14 +199,14 @@ export function createServer(
       if (req.method === "POST" && conversationMessages) {
         const payload = await body<{ body: string }>(req);
         const result = addMessage(store, userId, { conversationId: conversationMessages[1], body: payload.body });
-        await onChange();
+        await onChange({ kind: "message", messageId: result.id });
         return json(res, 201, result);
       }
 
       const conversationRead = url.pathname.match(/^\/conversations\/([^/]+)\/read$/);
       if (req.method === "POST" && conversationRead) {
         const result = markConversationRead(store, userId, conversationRead[1]);
-        await onChange();
+        await onChange({ kind: "conversation-read", conversationId: conversationRead[1], userId });
         return json(res, 200, result);
       }
 
@@ -210,13 +219,13 @@ export function createServer(
       if (req.method === "POST" && messageReaction) {
         const payload = await body<{ kind: any }>(req);
         const result = reactToMessage(store, userId, messageReaction[1], payload.kind);
-        await onChange();
+        await onChange({ kind: "reaction", reactionId: result.id });
         return json(res, 201, result);
       }
 
       if (req.method === "POST" && url.pathname === "/challenges") {
         const result = addChallenge(store, await body(req));
-        await onChange();
+        await onChange({ kind: "challenge", challengeId: result.id });
         return json(res, 201, result);
       }
 
@@ -224,14 +233,14 @@ export function createServer(
       if (req.method === "POST" && challengeRespond) {
         const payload = await body<{ accept: boolean }>(req);
         const result = respondChallenge(store, challengeRespond[1], userId, payload.accept);
-        await onChange();
+        await onChange({ kind: "challenge", challengeId: result.id });
         return json(res, 200, result);
       }
 
       const rematch = url.pathname.match(/^\/challenges\/([^/]+)\/rematch$/);
       if (req.method === "POST" && rematch) {
         const result = rematchChallenge(store, rematch[1]);
-        await onChange();
+        await onChange({ kind: "challenge", challengeId: result.id });
         return json(res, 201, result);
       }
 
@@ -239,14 +248,14 @@ export function createServer(
       if (req.method === "POST" && share) {
         const payload = await body<{ conversationId: string }>(req);
         const result = shareChallenge(store, userId, share[1], payload.conversationId);
-        await onChange();
+        await onChange({ kind: "challenge", challengeId: result.id, includeSharedMessages: true });
         return json(res, 201, result);
       }
 
       const reaction = url.pathname.match(/^\/feed\/([^/]+)\/reactions$/);
       if (req.method === "POST" && reaction) {
         const result = addReaction(store, reaction[1], await body(req));
-        await onChange();
+        await onChange({ kind: "reaction", reactionId: result.id });
         return json(res, 201, result);
       }
 
@@ -264,7 +273,7 @@ export function createServer(
       if (req.method === "POST" && url.pathname === "/devices") {
         const payload = await body<{ token: string }>(req);
         store.deviceTokens.push({ userId, token: payload.token, platform: "ios", createdAt: new Date().toISOString() });
-        await onChange();
+        await onChange({ kind: "device", userId, token: payload.token });
         return json(res, 201, { ok: true });
       }
 

@@ -14,13 +14,34 @@ import {
   Streak,
   User,
   UserBadge,
-  UserSettings
+  UserSettings,
+  WorkoutSummary
 } from "./domain.js";
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+type TransactionFn = (work: (query: QueryFn) => Promise<void>) => Promise<void>;
+
+export type PersistenceChange =
+  | { kind: "auth"; userId: string }
+  | { kind: "settings"; userId: string }
+  | { kind: "friendship"; friendshipId: string }
+  | { kind: "friendship-remove"; userId: string; friendId: string }
+  | { kind: "block"; blockerId: string; blockedId: string }
+  | { kind: "summary"; summaryId: string; userId: string }
+  | { kind: "workouts"; workoutIds: string[] }
+  | { kind: "goal"; goalId: string; userId: string }
+  | { kind: "conversation"; conversationId: string }
+  | { kind: "message"; messageId: string }
+  | { kind: "conversation-read"; conversationId: string; userId: string }
+  | { kind: "reaction"; reactionId: string }
+  | { kind: "challenge"; challengeId: string; includeSharedMessages?: boolean }
+  | { kind: "device"; userId: string; token: string };
 
 export class PostgresRepository {
-  constructor(private readonly query: QueryFn) {}
+  constructor(
+    private readonly query: QueryFn,
+    private readonly transaction: TransactionFn = async (work) => work(query)
+  ) {}
 
   async migrate(schemaPath: string | URL = "src/schema.sql"): Promise<void> {
     const hasUsers = await this.query("select to_regclass('public.users') as name");
@@ -37,6 +58,7 @@ export class PostgresRepository {
     const settings = (await this.query("select * from user_settings")).rows.map(mapSettings);
     const friendships = (await this.query("select * from friendships")).rows.map(mapFriendship);
     const summaries = (await this.query("select * from activity_summaries order by local_date")).rows.map(mapSummary);
+    const workouts = (await this.query("select * from workout_summaries order by started_at")).rows.map(mapWorkout);
     const goals = (await this.query("select * from goals")).rows.map(mapGoal);
     const streaks = (await this.query("select * from streaks")).rows.map(mapStreak);
     const challenges = (await this.query("select * from challenges")).rows.map(mapChallenge);
@@ -81,6 +103,7 @@ export class PostgresRepository {
       settings,
       friendships,
       summaries,
+      workouts,
       goals,
       streaks,
       challenges,
@@ -102,6 +125,7 @@ export class PostgresRepository {
     for (const settings of store.settings) await this.insertSettings(settings);
     for (const friendship of store.friendships) await this.insertFriendship(friendship);
     for (const summary of store.summaries) await this.insertSummary(summary);
+    for (const workout of store.workouts) await this.insertWorkout(workout);
     for (const goal of store.goals) await this.insertGoal(goal);
     for (const streak of store.streaks) await this.insertStreak(streak);
     for (const badge of store.badges) await this.insertBadge(badge);
@@ -141,6 +165,103 @@ export class PostgresRepository {
     );
   }
 
+  async persistChange(store: AppStore, change: PersistenceChange): Promise<void> {
+    await this.transaction(async (query) => {
+      const transactionalRepository = new PostgresRepository(query);
+      await transactionalRepository.applyChange(store, change);
+    });
+  }
+
+  private async applyChange(store: AppStore, change: PersistenceChange): Promise<void> {
+    switch (change.kind) {
+      case "auth": {
+        await this.insertUser(required(store.users.find((item) => item.id === change.userId), "User"));
+        const settings = store.settings.find((item) => item.userId === change.userId);
+        if (settings) await this.insertSettings(settings);
+        const streak = store.streaks.find((item) => item.userId === change.userId);
+        if (streak) await this.insertStreak(streak);
+        return;
+      }
+      case "settings": {
+        await this.insertSettings(required(store.settings.find((item) => item.userId === change.userId), "Settings"));
+        await this.insertUser(required(store.users.find((item) => item.id === change.userId), "User"));
+        return;
+      }
+      case "friendship":
+        await this.insertFriendship(required(store.friendships.find((item) => item.id === change.friendshipId), "Friendship"));
+        return;
+      case "friendship-remove":
+        await this.deleteFriendship(change.userId, change.friendId);
+        return;
+      case "block": {
+        await this.deleteFriendship(change.blockerId, change.blockedId);
+        const block = required(
+          store.blockedUsers.find((item) => item.blockerId === change.blockerId && item.blockedId === change.blockedId),
+          "Block"
+        );
+        await this.query(
+          `insert into blocked_users (blocker_id, blocked_id, created_at)
+           values ($1, $2, $3) on conflict (blocker_id, blocked_id) do update set created_at = excluded.created_at`,
+          [block.blockerId, block.blockedId, block.createdAt]
+        );
+        return;
+      }
+      case "summary":
+        await this.insertSummary(required(store.summaries.find((item) => item.id === change.summaryId), "Activity summary"));
+        await this.persistDerivedActivity(store, change.userId);
+        return;
+      case "workouts":
+        for (const workoutId of change.workoutIds) {
+          await this.insertWorkout(required(store.workouts.find((item) => item.id === workoutId), "Workout summary"));
+        }
+        return;
+      case "goal":
+        await this.insertGoal(required(store.goals.find((item) => item.id === change.goalId), "Goal"));
+        await this.persistDerivedActivity(store, change.userId);
+        return;
+      case "conversation": {
+        await this.insertConversation(required(store.conversations.find((item) => item.id === change.conversationId), "Conversation"));
+        for (const member of store.conversationMembers.filter((item) => item.conversationId === change.conversationId)) {
+          await this.insertConversationMember(member);
+        }
+        return;
+      }
+      case "message":
+        await this.persistMessage(required(store.messages.find((item) => item.id === change.messageId), "Message"));
+        return;
+      case "conversation-read":
+        await this.persistConversationRead(store, change.conversationId, change.userId);
+        return;
+      case "reaction": {
+        const reactions = store.feed.flatMap((item) => item.reactions).concat(store.messages.flatMap((message) => message.reactions));
+        await this.insertReaction(required(reactions.find((item) => item.id === change.reactionId), "Reaction"));
+        return;
+      }
+      case "challenge": {
+        const challenge = required(store.challenges.find((item) => item.id === change.challengeId), "Challenge");
+        await this.insertChallenge(challenge);
+        for (const participant of challenge.participants) await this.insertChallengeParticipant(challenge.id, participant);
+        if (change.includeSharedMessages && challenge.sharedConversationId) {
+          for (const message of store.messages.filter((item) => item.conversationId === challenge.sharedConversationId)) {
+            await this.persistMessage(message);
+          }
+        }
+        return;
+      }
+      case "device": {
+        const token = required(
+          store.deviceTokens.find((item) => item.userId === change.userId && item.token === change.token),
+          "Device token"
+        );
+        await this.query(
+          `insert into device_tokens (user_id, token, platform, created_at)
+           values ($1, $2, $3, $4) on conflict (user_id, token) do update set created_at = excluded.created_at`,
+          [token.userId, token.token, token.platform, token.createdAt]
+        );
+      }
+    }
+  }
+
   async findUserByEmail(email: string): Promise<User | undefined> {
     const result = await this.query("select * from users where email = $1 limit 1", [email]);
     return result.rows[0] ? mapUser(result.rows[0]) : undefined;
@@ -168,10 +289,36 @@ export class PostgresRepository {
     return mapSummary(result.rows[0]);
   }
 
+  async seedBadges(badges: Badge[]): Promise<void> {
+    for (const badge of badges) await this.insertBadge(badge);
+  }
+
   private async ensureRuntimeTables() {
-    await this.query("create table if not exists message_reads (message_id text not null references messages(id) on delete cascade, user_id text not null references users(id) on delete cascade, primary key(message_id, user_id))");
-    await this.query("create table if not exists conversation_mutes (conversation_id text not null references conversations(id) on delete cascade, user_id text not null references users(id) on delete cascade, primary key(conversation_id, user_id))");
-    await this.query("create table if not exists blocked_users (blocker_id text not null references users(id) on delete cascade, blocked_id text not null references users(id) on delete cascade, created_at timestamptz not null default now(), primary key(blocker_id, blocked_id))");
+    await this.query("create table if not exists schema_migrations (id text primary key, applied_at timestamptz not null default now())");
+    const applied = new Set((await this.query("select id from schema_migrations")).rows.map((row) => row.id));
+    const migrations = [
+      {
+        id: "001_runtime_social_tables",
+        statements: [
+          "create table if not exists message_reads (message_id text not null references messages(id) on delete cascade, user_id text not null references users(id) on delete cascade, primary key(message_id, user_id))",
+          "create table if not exists conversation_mutes (conversation_id text not null references conversations(id) on delete cascade, user_id text not null references users(id) on delete cascade, primary key(conversation_id, user_id))",
+          "create table if not exists blocked_users (blocker_id text not null references users(id) on delete cascade, blocked_id text not null references users(id) on delete cascade, created_at timestamptz not null default now(), primary key(blocker_id, blocked_id))"
+        ]
+      },
+      {
+        id: "002_workout_summaries",
+        statements: [
+          "create table if not exists workout_summaries (id text primary key, user_id text not null references users(id) on delete cascade, healthkit_uuid text not null, activity_type text not null check (activity_type in ('walking', 'running', 'strengthTraining')), started_at timestamptz not null, ended_at timestamptz not null, duration_seconds double precision not null default 0, distance_meters double precision not null default 0, calories double precision not null default 0, source text not null default 'healthkit', trust_level text not null default 'verified', updated_at timestamptz not null default now(), unique(user_id, healthkit_uuid))"
+        ]
+      }
+    ];
+    for (const migration of migrations) {
+      if (applied.has(migration.id)) continue;
+      await this.transaction(async (query) => {
+        for (const statement of migration.statements) await query(statement);
+        await query("insert into schema_migrations (id) values ($1) on conflict do nothing", [migration.id]);
+      });
+    }
   }
 
   private async clearDomainTables() {
@@ -189,6 +336,7 @@ export class PostgresRepository {
        delete from badges;
        delete from streaks;
        delete from goals;
+       delete from workout_summaries;
        delete from activity_summaries;
        delete from blocked_users;
        delete from device_tokens;
@@ -200,6 +348,46 @@ export class PostgresRepository {
     );
   }
 
+  private deleteFriendship(userId: string, friendId: string) {
+    return this.query(
+      `delete from friendships
+       where (requester_id = $1 and addressee_id = $2) or (requester_id = $2 and addressee_id = $1)`,
+      [userId, friendId]
+    );
+  }
+
+  private async persistDerivedActivity(store: AppStore, userId: string) {
+    const streak = store.streaks.find((item) => item.userId === userId);
+    if (streak) await this.insertStreak(streak);
+    for (const badge of store.userBadges.filter((item) => item.userId === userId)) {
+      await this.insertUserBadge(badge);
+    }
+  }
+
+  private async persistMessage(message: Message) {
+    await this.insertMessage(message);
+    for (const userId of message.readBy) {
+      await this.query(
+        "insert into message_reads (message_id, user_id) values ($1, $2) on conflict do nothing",
+        [message.id, userId]
+      );
+    }
+  }
+
+  private async persistConversationRead(store: AppStore, conversationId: string, userId: string) {
+    const member = required(
+      store.conversationMembers.find((item) => item.conversationId === conversationId && item.userId === userId),
+      "Conversation member"
+    );
+    await this.insertConversationMember(member);
+    for (const message of store.messages.filter((item) => item.conversationId === conversationId && item.readBy.includes(userId))) {
+      await this.query(
+        "insert into message_reads (message_id, user_id) values ($1, $2) on conflict do nothing",
+        [message.id, userId]
+      );
+    }
+  }
+
   private insertUser(user: User) {
     return this.query(
       `insert into users (id, username, display_name, email, phone, avatar_color, joined_at, searchable)
@@ -207,6 +395,20 @@ export class PostgresRepository {
        on conflict (id) do update set username = excluded.username, display_name = excluded.display_name,
          email = excluded.email, phone = excluded.phone, avatar_color = excluded.avatar_color, searchable = excluded.searchable`,
       [user.id, user.username, user.displayName, user.email, user.phone, user.avatarColor, user.joinedAt, user.searchable]
+    );
+  }
+
+  private insertWorkout(workout: WorkoutSummary) {
+    return this.query(
+      `insert into workout_summaries
+        (id, user_id, healthkit_uuid, activity_type, started_at, ended_at, duration_seconds, distance_meters, calories, source, trust_level, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       on conflict (user_id, healthkit_uuid) do update set activity_type = excluded.activity_type,
+         started_at = excluded.started_at, ended_at = excluded.ended_at, duration_seconds = excluded.duration_seconds,
+         distance_meters = excluded.distance_meters, calories = excluded.calories, trust_level = excluded.trust_level,
+         updated_at = excluded.updated_at`,
+      [workout.id, workout.userId, workout.healthkitUUID, workout.activityType, workout.startedAt, workout.endedAt,
+        workout.durationSeconds, workout.distanceMeters, workout.calories, workout.source, workout.trustLevel, workout.updatedAt]
     );
   }
 
@@ -328,7 +530,22 @@ export async function createProductionRepository(databaseUrl: string): Promise<P
     connectionString: databaseUrl,
     ssl: databaseSslOptions(databaseUrl)
   });
-  return new PostgresRepository((sql, params) => pool.query(sql, params));
+  return new PostgresRepository(
+    (sql, params) => pool.query(sql, params),
+    async (work) => {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        await work((sql, params) => client.query(sql, params));
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+  );
 }
 
 function databaseSslOptions(databaseUrl: string): boolean | { ca?: string; rejectUnauthorized: boolean } | undefined {
@@ -345,7 +562,7 @@ export async function createProductionSeedStore(databaseUrl?: string, useDemoDat
   return store;
 }
 
-export async function createProductionContext(databaseUrl?: string, useDemoData = false): Promise<{ store: AppStore; persist: () => Promise<void> }> {
+export async function createProductionContext(databaseUrl?: string, useDemoData = false): Promise<{ store: AppStore; persist: (change: PersistenceChange) => Promise<void> }> {
   if (!databaseUrl) {
     const store = useDemoData ? createDemoStore() : createEmptyStore();
     return { store, persist: async () => {} };
@@ -353,12 +570,18 @@ export async function createProductionContext(databaseUrl?: string, useDemoData 
 
   const repository = await createProductionRepository(databaseUrl);
   await repository.migrate();
-  const store = (await repository.loadStore()) ?? (useDemoData ? createDemoStore() : createEmptyStore());
-  store.badges = defaultBadges();
-  await repository.saveStore(store);
+  const loadedStore = await repository.loadStore();
+  const store = loadedStore ?? (useDemoData ? createDemoStore() : createEmptyStore());
+  const badges = defaultBadges();
+  store.badges = badges;
+  if (loadedStore) {
+    await repository.seedBadges(badges);
+  } else {
+    await repository.saveStore(store);
+  }
   return {
     store,
-    persist: () => repository.saveStore(store)
+    persist: (change) => repository.persistChange(store, change)
   };
 }
 
@@ -403,6 +626,23 @@ function mapSummary(row: any): ActivitySummary {
     runningDistanceMeters: row.running_distance_meters,
     workoutCount: row.workout_count,
     activeMinutes: row.active_minutes,
+    calories: row.calories,
+    source: row.source,
+    trustLevel: row.trust_level,
+    updatedAt: dateString(row.updated_at)
+  };
+}
+
+function mapWorkout(row: any): WorkoutSummary {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    healthkitUUID: row.healthkit_uuid,
+    activityType: row.activity_type,
+    startedAt: dateString(row.started_at),
+    endedAt: dateString(row.ended_at),
+    durationSeconds: row.duration_seconds,
+    distanceMeters: row.distance_meters,
     calories: row.calories,
     source: row.source,
     trustLevel: row.trust_level,
@@ -473,4 +713,9 @@ function dateString(value: unknown): string {
 
 function nullableDate(value: unknown): string | undefined {
   return value ? dateString(value) : undefined;
+}
+
+function required<T>(value: T | undefined, label: string): T {
+  if (!value) throw new Error(`${label} was not found in the persistence snapshot`);
+  return value;
 }
