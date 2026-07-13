@@ -3,6 +3,9 @@ import { URL } from "node:url";
 import { deleteAvatar, storeAvatar } from "./storage.js";
 import {
   addChallenge,
+  activityAggregatesFor,
+  activitySummariesFor,
+  activityWorkoutsFor,
   addGoal,
   addMessage,
   addReaction,
@@ -29,6 +32,15 @@ import {
   leaveConversation,
   addConversationMembers,
   messagesForConversation,
+  notificationsFor,
+  unreadNotificationCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+  archiveNotification,
+  deleteNotification,
+  lifetimePersonalBests,
+  personalBestsFor,
+  userSummaries,
   profileActivity,
   publicProfile,
   reactToMessage,
@@ -183,6 +195,41 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/feed/friends") {
         return json(res, 200, friendActivity(store, userId, numberParam(url, "limit", 20), numberParam(url, "offset", 0)));
       }
+
+      if (req.method === "GET" && url.pathname === "/activity/summaries") {
+        return json(res, 200, activitySummariesFor(store, userId, url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined));
+      }
+      if (req.method === "GET" && url.pathname === "/activity/workouts") {
+        return json(res, 200, activityWorkoutsFor(store, userId, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, type: url.searchParams.get("type") ?? undefined, before: url.searchParams.get("before") ?? undefined, limit: numberParam(url, "limit", 50) }));
+      }
+      if (req.method === "GET" && url.pathname === "/activity/aggregates") {
+        return json(res, 200, activityAggregatesFor(store, userId, numberParam(url, "weeks", 13)));
+      }
+      if (req.method === "GET" && url.pathname === "/me/personal-bests") {
+        return json(res, 200, lifetimePersonalBests(store, userId));
+      }
+      const userPersonalBests = url.pathname.match(/^\/users\/([^/]+)\/personal-bests$/);
+      if (req.method === "GET" && userPersonalBests) return json(res, 200, personalBestsFor(store, userId, userPersonalBests[1]));
+      if (req.method === "POST" && url.pathname === "/users/summaries") {
+        const payload = await body<{ ids: string[] }>(req);
+        return json(res, 200, userSummaries(store, userId, payload.ids ?? []));
+      }
+
+      if (req.method === "GET" && url.pathname === "/notifications") {
+        return json(res, 200, notificationsFor(store, userId, numberParam(url, "limit", 30), url.searchParams.get("before") ?? undefined, url.searchParams.get("unreadOnly") === "true"));
+      }
+      if (req.method === "GET" && url.pathname === "/notifications/unread-count") {
+        return json(res, 200, { count: unreadNotificationCount(store, userId) });
+      }
+      if (req.method === "POST" && url.pathname === "/notifications/read-all") {
+        const result = markAllNotificationsRead(store, userId); await persistChange({ kind: "notifications" }); return json(res, 200, result);
+      }
+      const notificationRoute = url.pathname.match(/^\/notifications\/([^/]+)$/);
+      const notificationRead = url.pathname.match(/^\/notifications\/([^/]+)\/read$/);
+      const notificationArchive = url.pathname.match(/^\/notifications\/([^/]+)\/archive$/);
+      if (req.method === "POST" && notificationRead) { const result = markNotificationRead(store, userId, notificationRead[1]); await persistChange({ kind: "notifications" }); return json(res, 200, result); }
+      if (req.method === "POST" && notificationArchive) { const result = archiveNotification(store, userId, notificationArchive[1]); await persistChange({ kind: "notifications" }); return json(res, 200, result); }
+      if (req.method === "DELETE" && notificationRoute) { const result = deleteNotification(store, userId, notificationRoute[1]); await persistChange({ kind: "notification-delete", notificationId: notificationRoute[1], userId }); return json(res, 200, result); }
 
       if (req.method === "POST" && url.pathname === "/friends/requests") {
         const payload = await body<{ addresseeId: string }>(req);
