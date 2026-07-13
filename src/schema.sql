@@ -89,6 +89,7 @@ CREATE TABLE goals (
   kind text NOT NULL,
   cadence text NOT NULL,
   target double precision NOT NULL,
+  is_enabled boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 

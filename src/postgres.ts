@@ -361,6 +361,14 @@ export class PostgresRepository {
       {
         id: "005_reports",
         statements: ["create table if not exists reports (id text primary key, reporter_id text not null references users(id) on delete cascade, target_type text not null check (target_type in ('user', 'message')), target_id text not null, reason text not null, created_at timestamptz not null default now())"]
+      },
+      {
+        id: "006_goal_enabled",
+        statements: ["alter table goals add column if not exists is_enabled boolean not null default true"]
+      },
+      {
+        id: "007_canonical_username",
+        statements: ["update users set display_name = username where display_name <> username"]
       }
     ];
     for (const migration of migrations) {
@@ -511,8 +519,8 @@ export class PostgresRepository {
 
   private insertGoal(goal: Goal) {
     return this.query(
-      "insert into goals (id, user_id, kind, cadence, target, created_at) values ($1, $2, $3, $4, $5, $6) on conflict (id) do update set kind = excluded.kind, cadence = excluded.cadence, target = excluded.target",
-      [goal.id, goal.userId, goal.kind, goal.cadence, goal.target, goal.createdAt]
+      "insert into goals (id, user_id, kind, cadence, target, is_enabled, created_at) values ($1, $2, $3, $4, $5, $6, $7) on conflict (id) do update set kind = excluded.kind, cadence = excluded.cadence, target = excluded.target, is_enabled = excluded.is_enabled",
+      [goal.id, goal.userId, goal.kind, goal.cadence, goal.target, goal.isEnabled, goal.createdAt]
     );
   }
 
@@ -718,7 +726,7 @@ function mapWorkout(row: any): WorkoutSummary {
 }
 
 function mapGoal(row: any): Goal {
-  return { id: row.id, userId: row.user_id, kind: row.kind, cadence: row.cadence, target: row.target, createdAt: dateString(row.created_at) };
+  return { id: row.id, userId: row.user_id, kind: row.kind, cadence: row.cadence, target: row.target, isEnabled: row.is_enabled ?? true, createdAt: dateString(row.created_at) };
 }
 
 function mapStreak(row: any): Streak {
