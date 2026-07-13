@@ -31,6 +31,7 @@ export type PersistenceChange =
   | { kind: "unblock"; blockerId: string; blockedId: string }
   | { kind: "account-delete"; userId: string }
   | { kind: "summary"; summaryId: string; userId: string }
+  | { kind: "summary-batch"; summaryIds: string[]; userId: string }
   | { kind: "workouts"; workoutIds: string[] }
   | { kind: "goal"; goalId: string; userId: string }
   | { kind: "goal-delete"; goalId: string; userId: string }
@@ -229,6 +230,12 @@ export class PostgresRepository {
         return;
       case "summary":
         await this.insertSummary(required(store.summaries.find((item) => item.id === change.summaryId), "Activity summary"));
+        await this.persistDerivedActivity(store, change.userId);
+        return;
+      case "summary-batch":
+        for (const summaryId of change.summaryIds) {
+          await this.insertSummary(required(store.summaries.find((item) => item.id === summaryId), "Activity summary"));
+        }
         await this.persistDerivedActivity(store, change.userId);
         return;
       case "workouts":

@@ -489,7 +489,7 @@ export function friendsFor(store: AppStore, userId: ID): User[] {
   return store.users.filter((item) => ids.includes(item.id));
 }
 
-export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">): ActivitySummary {
+export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">, updateDerived = true): ActivitySummary {
   const previousStreak = store.streaks.find((item) => item.userId === summaryInput.userId)?.currentDays ?? 0;
   const existing = store.summaries.find(
     (item) => item.userId === summaryInput.userId && item.localDate === summaryInput.localDate
@@ -507,10 +507,23 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
   } else {
     store.summaries.push(summary);
   }
-  refreshDerived(store, summary.userId);
-  const currentStreak = store.streaks.find((item) => item.userId === summary.userId)?.currentDays ?? 0;
-  if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, summary.userId, `reached a ${currentStreak}-day streak`);
+  if (updateDerived) {
+    refreshDerived(store, summary.userId);
+    const currentStreak = store.streaks.find((item) => item.userId === summary.userId)?.currentDays ?? 0;
+    if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, summary.userId, `reached a ${currentStreak}-day streak`);
+  }
   return existing ?? summary;
+}
+
+export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>): ActivitySummary[] {
+  if (inputs.length === 0) return [];
+  const userId = inputs[0].userId;
+  const previousStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
+  const saved = inputs.map((input) => upsertSummary(store, input, false));
+  refreshDerived(store, userId);
+  const currentStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
+  if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
+  return saved;
 }
 
 export function addGoal(store: AppStore, goal: Omit<Goal, "id" | "createdAt">): Goal {

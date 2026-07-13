@@ -44,6 +44,7 @@ import {
   updateGoal,
   deleteGoal,
   upsertSummary,
+  upsertSummaries,
   upsertWorkouts,
   weeklyRecapFor
 } from "./store.js";
@@ -222,8 +223,16 @@ export function createServer(
       }
 
       if (req.method === "POST" && url.pathname === "/activity/summaries") {
-        const result = upsertSummary(store, await body(req));
+        const result = upsertSummary(store, { ...(await body<Record<string, unknown>>(req)), userId } as Parameters<typeof upsertSummary>[1]);
         await onChange({ kind: "summary", summaryId: result.id, userId: result.userId });
+        return json(res, 201, result);
+      }
+
+      if (req.method === "POST" && url.pathname === "/activity/summaries/batch") {
+        const payload = await body<{ summaries: Array<Omit<Parameters<typeof upsertSummary>[1], "userId">> }>(req);
+        const inputs = (payload.summaries ?? []).slice(0, 90).map((summary) => ({ ...summary, userId }));
+        const result = upsertSummaries(store, inputs);
+        await onChange({ kind: "summary-batch", summaryIds: result.map((item) => item.id), userId });
         return json(res, 201, result);
       }
 
