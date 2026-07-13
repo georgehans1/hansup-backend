@@ -108,6 +108,8 @@ CREATE TABLE challenges (
   starts_on date NOT NULL,
   ends_on date NOT NULL,
   status text NOT NULL,
+  mode text NOT NULL DEFAULT 'competitive',
+  target double precision,
   rematch_of_challenge_id text REFERENCES challenges(id),
   shared_conversation_id text,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -189,4 +191,13 @@ CREATE TABLE device_tokens (
   platform text NOT NULL DEFAULT 'ios',
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(user_id, token)
+);
+
+CREATE TABLE reports (
+  id text PRIMARY KEY,
+  reporter_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target_type text NOT NULL CHECK (target_type IN ('user', 'message')),
+  target_id text NOT NULL,
+  reason text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
 );

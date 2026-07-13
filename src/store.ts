@@ -50,6 +50,7 @@ export interface AppStore {
   userBadges: UserBadge[];
   blockedUsers: Array<{ blockerId: ID; blockedId: ID; createdAt: string }>;
   deviceTokens: Array<{ userId: ID; token: string; platform: "ios"; createdAt: string }>;
+  reports: Array<{ id: ID; reporterId: ID; targetType: "user" | "message"; targetId: ID; reason: string; createdAt: string }>;
 }
 
 export function createEmptyStore(): AppStore {
@@ -69,7 +70,8 @@ export function createEmptyStore(): AppStore {
     badges: defaultBadges(),
     userBadges: [],
     blockedUsers: [],
-    deviceTokens: []
+    deviceTokens: [],
+    reports: []
   };
 }
 
@@ -220,7 +222,8 @@ export function createDemoStore(): AppStore {
     badges,
     userBadges,
     blockedUsers: [],
-    deviceTokens: []
+    deviceTokens: [],
+    reports: []
   };
 }
 
@@ -352,7 +355,7 @@ export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset
 export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
   const allowed = new Set(["walking", "running", "strengthTraining"]);
   const now = new Date().toISOString();
-  return input.map((workout) => {
+  const savedWorkouts = input.map((workout) => {
     if (!allowed.has(workout.activityType)) throw new Error("Unsupported workout activity type");
     const existing = store.workouts.find((item) => item.userId === userId && item.healthkitUUID === workout.healthkitUUID);
     const saved: WorkoutSummary = {
@@ -370,6 +373,8 @@ export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<Wo
     else store.workouts.push(saved);
     return saved;
   });
+  for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) refreshChallenge(store, challenge);
+  return savedWorkouts;
 }
 
 export function sendFriendRequest(store: AppStore, requesterId: ID, addresseeId: ID): Friendship {
@@ -406,8 +411,59 @@ export function removeFriend(store: AppStore, userId: ID, friendId: ID) {
 
 export function blockUser(store: AppStore, blockerId: ID, blockedId: ID) {
   removeFriend(store, blockerId, blockedId);
-  store.blockedUsers.push({ blockerId, blockedId, createdAt: new Date().toISOString() });
+  if (!store.blockedUsers.some((item) => item.blockerId === blockerId && item.blockedId === blockedId)) store.blockedUsers.push({ blockerId, blockedId, createdAt: new Date().toISOString() });
   return { ok: true };
+}
+
+export function blockedUsersFor(store: AppStore, userId: ID) {
+  const ids = store.blockedUsers.filter((item) => item.blockerId === userId).map((item) => item.blockedId);
+  return store.users.filter((item) => ids.includes(item.id)).map((item) => publicProfile(store, userId, item.id));
+}
+
+export function unblockUser(store: AppStore, userId: ID, blockedId: ID) {
+  store.blockedUsers = store.blockedUsers.filter((item) => !(item.blockerId === userId && item.blockedId === blockedId));
+  return { ok: true };
+}
+
+export function exportAccount(store: AppStore, userId: ID) {
+  return {
+    exportedAt: new Date().toISOString(),
+    user: requireUser(store, userId),
+    settings: store.settings.find((item) => item.userId === userId),
+    friends: friendsFor(store, userId).map((item) => publicProfile(store, userId, item.id)),
+    summaries: store.summaries.filter((item) => item.userId === userId),
+    workouts: store.workouts.filter((item) => item.userId === userId),
+    goals: store.goals.filter((item) => item.userId === userId),
+    challenges: store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId)),
+    messages: store.messages.filter((message) => store.conversationMembers.some((member) => member.userId === userId && member.conversationId === message.conversationId))
+  };
+}
+
+export function deleteAccount(store: AppStore, userId: ID) {
+  store.users = store.users.filter((item) => item.id !== userId);
+  store.settings = store.settings.filter((item) => item.userId !== userId);
+  store.friendships = store.friendships.filter((item) => item.requesterId !== userId && item.addresseeId !== userId);
+  store.summaries = store.summaries.filter((item) => item.userId !== userId);
+  store.workouts = store.workouts.filter((item) => item.userId !== userId);
+  store.goals = store.goals.filter((item) => item.userId !== userId);
+  store.streaks = store.streaks.filter((item) => item.userId !== userId);
+  store.feed = store.feed.filter((item) => item.userId !== userId);
+  store.userBadges = store.userBadges.filter((item) => item.userId !== userId);
+  store.blockedUsers = store.blockedUsers.filter((item) => item.blockerId !== userId && item.blockedId !== userId);
+  store.deviceTokens = store.deviceTokens.filter((item) => item.userId !== userId);
+  store.conversationMembers = store.conversationMembers.filter((item) => item.userId !== userId);
+  for (const message of store.messages) if (message.senderId === userId) message.senderId = undefined;
+  store.conversations = store.conversations.filter((item) => !(item.createdBy === userId && !store.conversationMembers.some((member) => member.conversationId === item.id)));
+  for (const challenge of store.challenges) challenge.participants = challenge.participants.filter((item) => item.userId !== userId);
+  store.challenges = store.challenges.filter((item) => item.creatorId !== userId && item.participants.length > 1);
+  return { ok: true };
+}
+
+export function addReport(store: AppStore, reporterId: ID, input: { targetType: "user" | "message"; targetId: ID; reason: string }) {
+  if (!input.reason.trim()) throw new Error("A report reason is required");
+  const report = { id: `report_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, reporterId, ...input, reason: input.reason.trim(), createdAt: new Date().toISOString() };
+  store.reports.push(report);
+  return report;
 }
 
 export function friendsFor(store: AppStore, userId: ID): User[] {
@@ -418,6 +474,7 @@ export function friendsFor(store: AppStore, userId: ID): User[] {
 }
 
 export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">): ActivitySummary {
+  const previousStreak = store.streaks.find((item) => item.userId === summaryInput.userId)?.currentDays ?? 0;
   const existing = store.summaries.find(
     (item) => item.userId === summaryInput.userId && item.localDate === summaryInput.localDate
   );
@@ -435,6 +492,8 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
     store.summaries.push(summary);
   }
   refreshDerived(store, summary.userId);
+  const currentStreak = store.streaks.find((item) => item.userId === summary.userId)?.currentDays ?? 0;
+  if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, summary.userId, `reached a ${currentStreak}-day streak`);
   return existing ?? summary;
 }
 
@@ -514,9 +573,43 @@ export function conversationsFor(store: AppStore, userId: ID) {
   }));
 }
 
-export function messagesForConversation(store: AppStore, userId: ID, conversationId: ID) {
+export function messagesForConversation(store: AppStore, userId: ID, conversationId: ID, limit = 50, before?: string) {
   requireMember(store, userId, conversationId);
-  return store.messages.filter((item) => item.conversationId === conversationId);
+  return store.messages.filter((item) => item.conversationId === conversationId && (!before || item.createdAt < before))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, Math.min(Math.max(limit, 1), 100)).reverse();
+}
+
+export function setConversationMuted(store: AppStore, userId: ID, conversationId: ID, muted: boolean) {
+  requireMember(store, userId, conversationId);
+  const conversation = store.conversations.find((item) => item.id === conversationId)!;
+  conversation.mutedBy = muted ? unique([...conversation.mutedBy, userId]) : conversation.mutedBy.filter((item) => item !== userId);
+  return conversation;
+}
+
+export function leaveConversation(store: AppStore, userId: ID, conversationId: ID) {
+  const member = requireMember(store, userId, conversationId);
+  const conversation = store.conversations.find((item) => item.id === conversationId);
+  if (!conversation || conversation.kind !== "group") throw new Error("Only group conversations can be left");
+  store.conversationMembers = store.conversationMembers.filter((item) => !(item.conversationId === conversationId && item.userId === userId));
+  conversation.mutedBy = conversation.mutedBy.filter((item) => item !== userId);
+  if (member.role === "owner") {
+    const next = store.conversationMembers.find((item) => item.conversationId === conversationId);
+    if (next) next.role = "owner";
+  }
+  return { ok: true };
+}
+
+export function addConversationMembers(store: AppStore, userId: ID, conversationId: ID, memberIds: ID[]) {
+  const actor = requireMember(store, userId, conversationId);
+  const conversation = store.conversations.find((item) => item.id === conversationId);
+  if (!conversation || conversation.kind !== "group" || actor.role !== "owner") throw new Error("Only the group owner can add members");
+  for (const memberId of memberIds) {
+    if (friendshipStatus(store, userId, memberId) !== "accepted") throw new Error("Groups can only include friends");
+    if (!store.conversationMembers.some((item) => item.conversationId === conversationId && item.userId === memberId)) {
+      store.conversationMembers.push(member(conversationId, memberId, "member", new Date().toISOString()));
+    }
+  }
+  return store.conversationMembers.filter((item) => item.conversationId === conversationId);
 }
 
 export function addMessage(store: AppStore, userId: ID, message: { conversationId: ID; body: string }): Message {
@@ -561,14 +654,23 @@ export function conversationComparison(store: AppStore, userId: ID, conversation
 }
 
 export function addChallenge(store: AppStore, challenge: Omit<Challenge, "id" | "createdAt" | "status" | "participants"> & { participantIds: ID[] }): Challenge {
+  if (challenge.endsOn < challenge.startsOn) throw new Error("Challenge end date must be after its start date");
+  if (challenge.mode === "target" && (!challenge.target || challenge.target <= 0)) throw new Error("Target challenges require a positive target");
+  for (const participantId of challenge.participantIds) {
+    if (participantId !== challenge.creatorId && friendshipStatus(store, challenge.creatorId, participantId) !== "accepted") {
+      throw new Error("Challenges can only include friends");
+    }
+  }
   const saved: Challenge = {
     ...challenge,
     id: `challenge_${store.challenges.length + 1}`,
     status: "inviting",
-    participants: unique([challenge.creatorId, ...challenge.participantIds]).map((userId) => participant(userId, userId === challenge.creatorId, challenge.kind, store.summaries)),
+    mode: challenge.mode ?? "competitive",
+    participants: unique([challenge.creatorId, ...challenge.participantIds]).map((userId) => ({ userId, accepted: userId === challenge.creatorId, score: 0, respondedAt: userId === challenge.creatorId ? new Date().toISOString() : undefined })),
     createdAt: new Date().toISOString()
   };
   store.challenges.push(saved);
+  refreshChallenge(store, saved);
   return saved;
 }
 
@@ -578,19 +680,41 @@ export function respondChallenge(store: AppStore, challengeId: ID, userId: ID, a
   if (!participant) throw new Error("Challenge participant not found");
   participant.accepted = accept;
   participant.respondedAt = new Date().toISOString();
-  if (accept && challenge.participants.every((item) => item.accepted)) challenge.status = "active";
+  refreshChallenge(store, challenge);
   return challenge;
+}
+
+export function challengesFor(store: AppStore, userId: ID): Challenge[] {
+  for (const challenge of store.challenges) refreshChallenge(store, challenge);
+  return store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId));
+}
+
+export function challengeFor(store: AppStore, userId: ID, challengeId: ID): Challenge {
+  const challenge = requireChallenge(store, challengeId);
+  if (!challenge.participants.some((item) => item.userId === userId)) throw new Error("Challenge participant not found");
+  refreshChallenge(store, challenge);
+  return challenge;
+}
+
+export function refreshChallenges(store: AppStore, userId?: ID): Challenge[] {
+  const challenges = userId ? challengesFor(store, userId) : store.challenges;
+  for (const challenge of challenges) refreshChallenge(store, challenge);
+  return challenges;
 }
 
 export function rematchChallenge(store: AppStore, challengeId: ID): Challenge {
   const original = requireChallenge(store, challengeId);
+  const durationDays = Math.max(0, Math.round((Date.parse(`${original.endsOn}T00:00:00Z`) - Date.parse(`${original.startsOn}T00:00:00Z`)) / 86400000));
+  const startsOn = currentDateForUser(store, original.creatorId);
   return addChallenge(store, {
     creatorId: original.creatorId,
     title: `${original.title} Rematch`,
     kind: original.kind,
     template: original.template,
-    startsOn: original.startsOn,
-    endsOn: original.endsOn,
+    startsOn,
+    endsOn: addLocalDays(startsOn, durationDays),
+    mode: original.mode,
+    target: original.target,
     participantIds: original.participants.map((item) => item.userId),
     rematchOfChallengeId: original.id
   });
@@ -700,6 +824,36 @@ function refreshDerived(store: AppStore, userId: ID) {
     existing: store.userBadges
   });
   store.userBadges.push(...newBadges);
+  for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) refreshChallenge(store, challenge);
+}
+
+function refreshChallenge(store: AppStore, challenge: Challenge) {
+  for (const participant of challenge.participants) {
+    if (!participant.accepted) continue;
+    const summaries = store.summaries.filter((item) => item.userId === participant.userId && item.localDate >= challenge.startsOn && item.localDate <= challenge.endsOn);
+    if (challenge.kind === "strengthTraining") {
+      participant.score = store.workouts.filter((item) => item.userId === participant.userId && item.activityType === "strengthTraining" && item.startedAt.slice(0, 10) >= challenge.startsOn && item.startedAt.slice(0, 10) <= challenge.endsOn).reduce((sum, item) => sum + item.durationSeconds / 60, 0);
+    } else {
+      participant.score = scoreChallenge(challenge.kind, summaries);
+    }
+  }
+  const today = currentDateForUser(store, challenge.creatorId);
+  const invited = challenge.participants.filter((item) => item.userId !== challenge.creatorId);
+  const allResponded = invited.every((item) => item.respondedAt);
+  if (today > challenge.endsOn) challenge.status = "completed";
+  else if (allResponded && challenge.participants.filter((item) => item.accepted).length <= 1) challenge.status = "completed";
+  else if (allResponded && challenge.participants.filter((item) => item.accepted).length > 1 && today >= challenge.startsOn) challenge.status = "active";
+  else challenge.status = "inviting";
+}
+
+function addMilestoneMessages(store: AppStore, userId: ID, milestone: string) {
+  const name = store.users.find((item) => item.id === userId)?.displayName ?? "A friend";
+  const conversationIds = store.conversationMembers.filter((item) => item.userId === userId).map((item) => item.conversationId);
+  for (const conversationId of conversationIds) {
+    const body = `${name} ${milestone}.`;
+    if (store.messages.some((item) => item.conversationId === conversationId && item.kind === "system" && item.body === body)) continue;
+    store.messages.push(systemMessage(`message_milestone_${Date.now()}_${conversationId}`, conversationId, body, new Date().toISOString()));
+  }
 }
 
 function goalsForStreak(store: AppStore, userId: ID): Goal[] {

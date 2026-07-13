@@ -27,6 +27,8 @@ export type PersistenceChange =
   | { kind: "friendship"; friendshipId: string }
   | { kind: "friendship-remove"; userId: string; friendId: string }
   | { kind: "block"; blockerId: string; blockedId: string }
+  | { kind: "unblock"; blockerId: string; blockedId: string }
+  | { kind: "account-delete"; userId: string }
   | { kind: "summary"; summaryId: string; userId: string }
   | { kind: "workouts"; workoutIds: string[] }
   | { kind: "goal"; goalId: string; userId: string }
@@ -34,9 +36,12 @@ export type PersistenceChange =
   | { kind: "conversation"; conversationId: string }
   | { kind: "message"; messageId: string }
   | { kind: "conversation-read"; conversationId: string; userId: string }
+  | { kind: "conversation-settings"; conversationId: string; userId: string }
+  | { kind: "conversation-leave"; conversationId: string; userId: string }
   | { kind: "reaction"; reactionId: string }
   | { kind: "challenge"; challengeId: string; includeSharedMessages?: boolean }
-  | { kind: "device"; userId: string; token: string };
+  | { kind: "device"; userId: string; token: string }
+  | { kind: "report"; reportId: string };
 
 export class PostgresRepository {
   constructor(
@@ -84,6 +89,9 @@ export class PostgresRepository {
       platform: row.platform,
       createdAt: dateString(row.created_at)
     }));
+    const reports = (await this.query("select * from reports")).rows.map((row) => ({
+      id: row.id, reporterId: row.reporter_id, targetType: row.target_type, targetId: row.target_id, reason: row.reason, createdAt: dateString(row.created_at)
+    }));
 
     for (const challenge of challenges) {
       challenge.participants = participants.filter((row) => row.challenge_id === challenge.id).map(mapChallengeParticipant);
@@ -115,7 +123,8 @@ export class PostgresRepository {
       badges,
       userBadges,
       blockedUsers,
-      deviceTokens
+      deviceTokens,
+      reports
     };
   }
 
@@ -164,6 +173,7 @@ export class PostgresRepository {
        values ($1, $2, $3, $4) on conflict (user_id, token) do update set created_at = excluded.created_at`,
       [token.userId, token.token, token.platform, token.createdAt]
     );
+    for (const report of store.reports) await this.insertReport(report);
   }
 
   async persistChange(store: AppStore, change: PersistenceChange): Promise<void> {
@@ -207,6 +217,12 @@ export class PostgresRepository {
         );
         return;
       }
+      case "unblock":
+        await this.query("delete from blocked_users where blocker_id = $1 and blocked_id = $2", [change.blockerId, change.blockedId]);
+        return;
+      case "account-delete":
+        await this.query("delete from users where id = $1", [change.userId]);
+        return;
       case "summary":
         await this.insertSummary(required(store.summaries.find((item) => item.id === change.summaryId), "Activity summary"));
         await this.persistDerivedActivity(store, change.userId);
@@ -237,6 +253,17 @@ export class PostgresRepository {
       case "conversation-read":
         await this.persistConversationRead(store, change.conversationId, change.userId);
         return;
+      case "conversation-settings": {
+        await this.query("delete from conversation_mutes where conversation_id = $1 and user_id = $2", [change.conversationId, change.userId]);
+        const conversation = store.conversations.find((item) => item.id === change.conversationId);
+        if (conversation?.mutedBy.includes(change.userId)) await this.query("insert into conversation_mutes (conversation_id, user_id) values ($1, $2) on conflict do nothing", [change.conversationId, change.userId]);
+        return;
+      }
+      case "conversation-leave":
+        await this.query("delete from conversation_members where conversation_id = $1 and user_id = $2", [change.conversationId, change.userId]);
+        await this.query("delete from conversation_mutes where conversation_id = $1 and user_id = $2", [change.conversationId, change.userId]);
+        for (const member of store.conversationMembers.filter((item) => item.conversationId === change.conversationId)) await this.insertConversationMember(member);
+        return;
       case "reaction": {
         const reactions = store.feed.flatMap((item) => item.reactions).concat(store.messages.flatMap((message) => message.reactions));
         await this.insertReaction(required(reactions.find((item) => item.id === change.reactionId), "Reaction"));
@@ -263,7 +290,11 @@ export class PostgresRepository {
            values ($1, $2, $3, $4) on conflict (user_id, token) do update set created_at = excluded.created_at`,
           [token.userId, token.token, token.platform, token.createdAt]
         );
+        return;
       }
+      case "report":
+        await this.insertReport(required(store.reports.find((item) => item.id === change.reportId), "Report"));
+        return;
     }
   }
 
@@ -319,6 +350,17 @@ export class PostgresRepository {
       {
         id: "003_profile_avatar",
         statements: ["alter table users add column if not exists avatar_url text"]
+      },
+      {
+        id: "004_challenge_rules",
+        statements: [
+          "alter table challenges add column if not exists mode text not null default 'competitive'",
+          "alter table challenges add column if not exists target double precision"
+        ]
+      },
+      {
+        id: "005_reports",
+        statements: ["create table if not exists reports (id text primary key, reporter_id text not null references users(id) on delete cascade, target_type text not null check (target_type in ('user', 'message')), target_id text not null, reason text not null, created_at timestamptz not null default now())"]
       }
     ];
     for (const migration of migrations) {
@@ -347,6 +389,7 @@ export class PostgresRepository {
        delete from goals;
        delete from workout_summaries;
        delete from activity_summaries;
+       delete from reports;
        delete from blocked_users;
        delete from device_tokens;
        delete from friendships;
@@ -371,6 +414,12 @@ export class PostgresRepository {
     for (const badge of store.userBadges.filter((item) => item.userId === userId)) {
       await this.insertUserBadge(badge);
     }
+    for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) {
+      await this.insertChallenge(challenge);
+      for (const participant of challenge.participants) await this.insertChallengeParticipant(challenge.id, participant);
+    }
+    const conversationIds = store.conversationMembers.filter((item) => item.userId === userId).map((item) => item.conversationId);
+    for (const message of store.messages.filter((item) => item.kind === "system" && conversationIds.includes(item.conversationId))) await this.persistMessage(message);
   }
 
   private async persistMessage(message: Message) {
@@ -406,6 +455,11 @@ export class PostgresRepository {
          avatar_url = excluded.avatar_url, searchable = excluded.searchable`,
       [user.id, user.username, user.displayName, user.email, user.phone, user.avatarColor, user.avatarURL, user.joinedAt, user.searchable]
     );
+  }
+
+  private insertReport(report: AppStore["reports"][number]) {
+    return this.query("insert into reports (id, reporter_id, target_type, target_id, reason, created_at) values ($1, $2, $3, $4, $5, $6) on conflict (id) do nothing",
+      [report.id, report.reporterId, report.targetType, report.targetId, report.reason, report.createdAt]);
   }
 
   private insertWorkout(workout: WorkoutSummary) {
@@ -485,9 +539,11 @@ export class PostgresRepository {
 
   private insertChallenge(challenge: Challenge) {
     return this.query(
-      `insert into challenges (id, creator_id, title, kind, template, starts_on, ends_on, status, rematch_of_challenge_id, shared_conversation_id, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) on conflict (id) do update set status = excluded.status, shared_conversation_id = excluded.shared_conversation_id`,
-      [challenge.id, challenge.creatorId, challenge.title, challenge.kind, challenge.template, challenge.startsOn, challenge.endsOn, challenge.status, challenge.rematchOfChallengeId, challenge.sharedConversationId, challenge.createdAt]
+      `insert into challenges (id, creator_id, title, kind, template, starts_on, ends_on, status, mode, target, rematch_of_challenge_id, shared_conversation_id, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) on conflict (id) do update set status = excluded.status,
+         mode = excluded.mode, target = excluded.target, shared_conversation_id = excluded.shared_conversation_id`,
+      [challenge.id, challenge.creatorId, challenge.title, challenge.kind, challenge.template, challenge.startsOn, challenge.endsOn, challenge.status,
+        challenge.mode ?? "competitive", challenge.target, challenge.rematchOfChallengeId, challenge.sharedConversationId, challenge.createdAt]
     );
   }
 
@@ -679,6 +735,8 @@ function mapChallenge(row: any): Challenge {
     startsOn: dateString(row.starts_on).slice(0, 10),
     endsOn: dateString(row.ends_on).slice(0, 10),
     status: row.status,
+    mode: row.mode ?? "competitive",
+    target: row.target == null ? undefined : Number(row.target),
     participants: [],
     rematchOfChallengeId: row.rematch_of_challenge_id,
     sharedConversationId: row.shared_conversation_id,
