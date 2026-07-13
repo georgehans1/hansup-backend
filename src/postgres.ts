@@ -194,6 +194,7 @@ export class PostgresRepository {
         if (settings) await this.insertSettings(settings);
         const streak = store.streaks.find((item) => item.userId === change.userId);
         if (streak) await this.insertStreak(streak);
+        for (const goal of store.goals.filter((item) => item.userId === change.userId)) await this.insertGoal(goal);
         return;
       }
       case "settings": {

@@ -254,6 +254,17 @@ export function authWithIdentity(store: AppStore, identity: VerifiedIdentity, to
     });
     store.streaks.push({ userId: saved.id, currentDays: 0, bestDays: 0, updatedAt: new Date().toISOString() });
   }
+  if (!store.goals.some((goal) => goal.userId === saved.id && goal.kind === "steps" && goal.cadence === "daily")) {
+    store.goals.push({
+      id: `goal_${saved.id}_daily_steps`,
+      userId: saved.id,
+      kind: "steps",
+      cadence: "daily",
+      target: 10_000,
+      isEnabled: true,
+      createdAt: new Date().toISOString()
+    });
+  }
   return { ...issueDemoTokens(saved.id, tokenSecret), user: saved, needsUsername: isNewUser };
 }
 
