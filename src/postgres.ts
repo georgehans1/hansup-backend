@@ -3,6 +3,7 @@ import { info } from "./logger.js";
 import { AppStore, createDemoStore, createEmptyStore, defaultBadges } from "./store.js";
 import {
   ActivitySummary,
+  AppNotification,
   Badge,
   Challenge,
   Conversation,
@@ -43,7 +44,9 @@ export type PersistenceChange =
   | { kind: "reaction"; reactionId: string }
   | { kind: "challenge"; challengeId: string; includeSharedMessages?: boolean }
   | { kind: "device"; userId: string; token: string }
-  | { kind: "report"; reportId: string };
+  | { kind: "report"; reportId: string }
+  | { kind: "notifications" }
+  | { kind: "notification-delete"; notificationId: string; userId: string };
 
 export class PostgresRepository {
   constructor(
@@ -96,6 +99,7 @@ export class PostgresRepository {
     const reports = (await this.query("select * from reports")).rows.map((row) => ({
       id: row.id, reporterId: row.reporter_id, targetType: row.target_type, targetId: row.target_id, reason: row.reason, createdAt: dateString(row.created_at)
     }));
+    const notifications = (await this.query("select * from notifications order by created_at")).rows.map(mapNotification);
 
     for (const challenge of challenges) {
       challenge.participants = participants.filter((row) => row.challenge_id === challenge.id).map(mapChallengeParticipant);
@@ -128,7 +132,8 @@ export class PostgresRepository {
       userBadges,
       blockedUsers,
       deviceTokens,
-      reports
+      reports,
+      notifications
     };
   }
 
@@ -178,12 +183,14 @@ export class PostgresRepository {
       [token.userId, token.token, token.platform, token.createdAt]
     );
     for (const report of store.reports) await this.insertReport(report);
+    for (const notification of store.notifications) await this.insertNotification(notification);
   }
 
   async persistChange(store: AppStore, change: PersistenceChange): Promise<void> {
     await this.transaction(async (query) => {
       const transactionalRepository = new PostgresRepository(query);
       await transactionalRepository.applyChange(store, change);
+      await transactionalRepository.persistNotifications(store);
     });
   }
 
@@ -198,6 +205,11 @@ export class PostgresRepository {
         for (const goal of store.goals.filter((item) => item.userId === change.userId)) await this.insertGoal(goal);
         return;
       }
+      case "notifications":
+        return;
+      case "notification-delete":
+        await this.query("delete from notifications where id = $1 and user_id = $2", [change.notificationId, change.userId]);
+        return;
       case "settings": {
         await this.insertSettings(required(store.settings.find((item) => item.userId === change.userId), "Settings"));
         await this.insertUser(required(store.users.find((item) => item.id === change.userId), "User"));
@@ -380,6 +392,14 @@ export class PostgresRepository {
       {
         id: "007_canonical_username",
         statements: ["update users set display_name = username where display_name <> username"]
+      },
+      {
+        id: "008_notifications",
+        statements: [
+          "create table if not exists notifications (id text primary key, user_id text not null references users(id) on delete cascade, type text not null, actor_id text references users(id) on delete set null, entity_type text, entity_id text, title text not null, body text not null, metadata jsonb not null default '{}'::jsonb, created_at timestamptz not null, read_at timestamptz, archived_at timestamptz, deduplication_key text not null unique)",
+          "create index if not exists notifications_user_created_idx on notifications(user_id, created_at desc)",
+          "create index if not exists notifications_user_unread_idx on notifications(user_id, read_at) where archived_at is null"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -394,6 +414,7 @@ export class PostgresRepository {
   private async clearDomainTables() {
     await this.query(
       `delete from message_reads;
+       delete from notifications;
        delete from conversation_mutes;
        delete from reactions;
        delete from messages;
@@ -449,6 +470,19 @@ export class PostgresRepository {
         [message.id, userId]
       );
     }
+  }
+
+  private async persistNotifications(store: AppStore) {
+    for (const notification of store.notifications) await this.insertNotification(notification);
+  }
+
+  private insertNotification(notification: AppNotification) {
+    return this.query(
+      `insert into notifications (id, user_id, type, actor_id, entity_type, entity_id, title, body, metadata, created_at, read_at, archived_at, deduplication_key)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       on conflict (id) do update set read_at=excluded.read_at, archived_at=excluded.archived_at, title=excluded.title, body=excluded.body, metadata=excluded.metadata`,
+      [notification.id, notification.userId, notification.type, notification.actorId, notification.entityType, notification.entityId, notification.title, notification.body, JSON.stringify(notification.metadata), notification.createdAt, notification.readAt, notification.archivedAt, notification.deduplicationKey]
+    );
   }
 
   private async persistConversationRead(store: AppStore, conversationId: string, userId: string) {
@@ -785,6 +819,24 @@ function mapMessage(row: any): Message {
 
 function mapReaction(row: any): Reaction {
   return { id: row.id, targetType: row.target_type, targetId: row.target_id, userId: row.user_id, kind: row.kind, createdAt: dateString(row.created_at) };
+}
+
+function mapNotification(row: any): AppNotification {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    type: row.type,
+    actorId: row.actor_id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    title: row.title,
+    body: row.body,
+    metadata: row.metadata ?? {},
+    createdAt: dateString(row.created_at),
+    readAt: nullableDate(row.read_at),
+    archivedAt: nullableDate(row.archived_at),
+    deduplicationKey: row.deduplication_key
+  };
 }
 
 function mapBadge(row: any): Badge {

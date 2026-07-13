@@ -2,7 +2,7 @@ import { loadLocalEnv } from "./env.js";
 import { createServer } from "./server.js";
 import { productionConfig, missingProductionConfig } from "./config.js";
 import { createProductionContext } from "./postgres.js";
-import { addDailyGroupChallengeUpdates, refreshAllChallenges } from "./store.js";
+import { addDailyGroupChallengeUpdates, generateScheduledNotifications, refreshAllChallenges } from "./store.js";
 import { error, info, warn } from "./logger.js";
 import { verifyAvatarBucket } from "./storage.js";
 
@@ -28,8 +28,10 @@ setInterval(async () => {
   try {
     const changed = refreshAllChallenges(store);
     const groupUpdates = addDailyGroupChallengeUpdates(store);
+    generateScheduledNotifications(store);
     const affected = [...new Set([...changed, ...groupUpdates])];
     for (const challengeId of affected) await persist({ kind: "challenge", challengeId, includeSharedMessages: groupUpdates.includes(challengeId) });
+    await persist({ kind: "notifications" });
     if (changed.length > 0) info("challenges_finalized", { count: changed.length });
     if (groupUpdates.length > 0) info("group_challenge_updates_posted", { count: groupUpdates.length });
   } catch (failure) {

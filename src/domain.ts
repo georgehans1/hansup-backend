@@ -17,6 +17,7 @@ export type ConversationKind = "direct" | "group";
 export type MessageKind = "user" | "system";
 export type LeaderboardPeriod = "today" | "week" | "month" | "all";
 export type BadgeRuleKind = "streak" | "challengeWins" | "lifetimeSteps" | "goalHits" | "reactionGiven";
+export type NotificationType = "friendRequest" | "friendAccepted" | "message" | "groupAdded" | "challengeInvite" | "challengeUpdate" | "reaction" | "goal" | "streak" | "rank" | "recap" | "personalBest";
 
 export interface User {
   id: ID;
@@ -216,6 +217,22 @@ export interface UserBadge {
   userId: ID;
   badgeId: ID;
   earnedAt: string;
+}
+
+export interface AppNotification {
+  id: ID;
+  userId: ID;
+  type: NotificationType;
+  actorId?: ID;
+  entityType?: string;
+  entityId?: ID;
+  title: string;
+  body: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  readAt?: string;
+  archivedAt?: string;
+  deduplicationKey: string;
 }
 
 export interface ProfileStats {

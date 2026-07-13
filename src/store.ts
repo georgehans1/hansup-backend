@@ -1,5 +1,6 @@
 import {
   ActivityComparison,
+  AppNotification,
   ActivitySummary,
   Badge,
   Challenge,
@@ -51,6 +52,7 @@ export interface AppStore {
   blockedUsers: Array<{ blockerId: ID; blockedId: ID; createdAt: string }>;
   deviceTokens: Array<{ userId: ID; token: string; platform: "ios"; createdAt: string }>;
   reports: Array<{ id: ID; reporterId: ID; targetType: "user" | "message"; targetId: ID; reason: string; createdAt: string }>;
+  notifications: AppNotification[];
 }
 
 export function createEmptyStore(): AppStore {
@@ -71,7 +73,8 @@ export function createEmptyStore(): AppStore {
     userBadges: [],
     blockedUsers: [],
     deviceTokens: [],
-    reports: []
+    reports: [],
+    notifications: []
   };
 }
 
@@ -223,7 +226,8 @@ export function createDemoStore(): AppStore {
     userBadges,
     blockedUsers: [],
     deviceTokens: [],
-    reports: []
+    reports: [],
+    notifications: []
   };
 }
 
@@ -369,6 +373,26 @@ export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset
       : workout);
 }
 
+export function workoutForViewer(store: AppStore, viewerId: ID, workoutId: ID) {
+  const workout = store.workouts.find((item) => item.id === workoutId);
+  if (!workout) throw new Error("Activity not found");
+  if (workout.userId === viewerId) return workout;
+  if (friendshipStatus(store, viewerId, workout.userId) !== "accepted") throw new Error("Activity not available");
+  const privacy = store.settings.find((item) => item.userId === workout.userId);
+  if (privacy?.hideActivityFromFriends) throw new Error("Activity not available");
+  return privacy?.hideExactNumbers ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;
+}
+
+export function summaryForViewer(store: AppStore, viewerId: ID, summaryId: ID) {
+  const summary = store.summaries.find((item) => item.id === summaryId);
+  if (!summary) throw new Error("Activity not found");
+  if (summary.userId === viewerId) return summary;
+  if (friendshipStatus(store, viewerId, summary.userId) !== "accepted") throw new Error("Activity not available");
+  const privacy = store.settings.find((item) => item.userId === summary.userId);
+  if (privacy?.hideActivityFromFriends || privacy?.hideExactNumbers) throw new Error("Activity details are private");
+  return summary;
+}
+
 export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
   const allowed = new Set(["walking", "running", "strengthTraining"]);
   const now = new Date().toISOString();
@@ -407,6 +431,7 @@ export function sendFriendRequest(store: AppStore, requesterId: ID, addresseeId:
   }
   const saved = { id: `friendship_${store.friendships.length + 1}`, requesterId, addresseeId, status: "pending" as const, createdAt: new Date().toISOString() };
   store.friendships.push(saved);
+  notify(store, { userId: addresseeId, actorId: requesterId, type: "friendRequest", entityType: "friendship", entityId: saved.id, title: "New friend request", body: `${displayName(store, requesterId)} wants to connect.`, deduplicationKey: `friend-request:${saved.id}` });
   return saved;
 }
 
@@ -416,6 +441,7 @@ export function respondFriendRequest(store: AppStore, friendshipId: ID, userId: 
   if (friendship.addresseeId !== userId) throw new Error("Only the addressee can respond");
   friendship.status = accept ? "accepted" : "declined";
   friendship.respondedAt = new Date().toISOString();
+  if (accept) notify(store, { userId: friendship.requesterId, actorId: userId, type: "friendAccepted", entityType: "user", entityId: userId, title: "Friend request accepted", body: `${displayName(store, userId)} is now your friend.`, deduplicationKey: `friend-accepted:${friendship.id}` });
   return friendship;
 }
 
@@ -641,6 +667,7 @@ export function addConversationMembers(store: AppStore, userId: ID, conversation
     if (friendshipStatus(store, userId, memberId) !== "accepted") throw new Error("Groups can only include friends");
     if (!store.conversationMembers.some((item) => item.conversationId === conversationId && item.userId === memberId)) {
       store.conversationMembers.push(member(conversationId, memberId, "member", new Date().toISOString()));
+      notify(store, { userId: memberId, actorId: userId, type: "groupAdded", entityType: "conversation", entityId: conversationId, title: "Added to a group", body: `${displayName(store, userId)} added you to ${conversation.title ?? "a group"}.`, deduplicationKey: `group-added:${conversationId}:${memberId}` });
     }
   }
   return store.conversationMembers.filter((item) => item.conversationId === conversationId);
@@ -650,6 +677,9 @@ export function addMessage(store: AppStore, userId: ID, message: { conversationI
   requireMember(store, userId, message.conversationId);
   const saved = chatMessage(`message_${store.messages.length + 1}`, message.conversationId, userId, message.body, new Date().toISOString(), [userId]);
   store.messages.push(saved);
+  for (const member of store.conversationMembers.filter((item) => item.conversationId === message.conversationId && item.userId !== userId)) {
+    notify(store, { userId: member.userId, actorId: userId, type: "message", entityType: "conversation", entityId: message.conversationId, title: "New message", body: message.body, deduplicationKey: `message:${saved.id}:${member.userId}` });
+  }
   return saved;
 }
 
@@ -669,6 +699,7 @@ export function reactToMessage(store: AppStore, userId: ID, messageId: ID, kind:
   requireMember(store, userId, message.conversationId);
   const saved = reaction(`message_reaction_${message.reactions.length + 1}`, "message", messageId, userId, kind, new Date().toISOString());
   message.reactions.push(saved);
+  if (message.senderId && message.senderId !== userId) notify(store, { userId: message.senderId, actorId: userId, type: "reaction", entityType: "conversation", entityId: message.conversationId, title: "Message reaction", body: `${displayName(store, userId)} reacted to your message.`, deduplicationKey: `message-reaction:${saved.id}` });
   return saved;
 }
 
@@ -704,6 +735,9 @@ export function addChallenge(store: AppStore, challenge: Omit<Challenge, "id" | 
     createdAt: new Date().toISOString()
   };
   store.challenges.push(saved);
+  for (const participant of saved.participants.filter((item) => item.userId !== saved.creatorId)) {
+    notify(store, { userId: participant.userId, actorId: saved.creatorId, type: "challengeInvite", entityType: "challenge", entityId: saved.id, title: "Challenge invitation", body: saved.title, deduplicationKey: `challenge-invite:${saved.id}:${participant.userId}` });
+  }
   if (saved.sharedConversationId) {
     requireMember(store, challenge.creatorId, saved.sharedConversationId);
     store.messages.push(systemMessage(`message_challenge_invite_${saved.id}`, saved.sharedConversationId, `Challenge invite: ${saved.title}. Open Challenges to accept and track progress.`, new Date().toISOString()));
@@ -718,6 +752,7 @@ export function respondChallenge(store: AppStore, challengeId: ID, userId: ID, a
   if (!participant) throw new Error("Challenge participant not found");
   participant.accepted = accept;
   participant.respondedAt = new Date().toISOString();
+  notify(store, { userId: challenge.creatorId, actorId: userId, type: "challengeUpdate", entityType: "challenge", entityId: challenge.id, title: accept ? "Challenge accepted" : "Challenge declined", body: `${displayName(store, userId)} ${accept ? "joined" : "declined"} ${challenge.title}.`, deduplicationKey: `challenge-response:${challenge.id}:${userId}` });
   refreshChallenge(store, challenge);
   return challenge;
 }
@@ -771,8 +806,55 @@ export function addReaction(store: AppStore, feedItemId: ID, reactionInput: { us
   if (!item) throw new Error("Feed item not found");
   const saved = reaction(`reaction_${item.reactions.length + 1}`, "feed", feedItemId, reactionInput.userId, reactionInput.kind, new Date().toISOString());
   item.reactions.push(saved);
+  if (item.userId !== reactionInput.userId) notify(store, { userId: item.userId, actorId: reactionInput.userId, type: "reaction", entityType: "feed", entityId: item.id, title: "New reaction", body: `${displayName(store, reactionInput.userId)} reacted to your activity.`, deduplicationKey: `reaction:${saved.id}` });
   return saved;
 }
+
+export function notificationsFor(store: AppStore, userId: ID, limit = 30, before?: string, unreadOnly = false) {
+  const rows = store.notifications.filter((item) => item.userId === userId && !item.archivedAt && (!before || item.createdAt < before) && (!unreadOnly || !item.readAt))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, Math.min(Math.max(limit, 1), 100));
+  return rows.map((item) => ({ ...item, actor: item.actorId ? publicProfile(store, userId, item.actorId) : undefined }));
+}
+
+export function unreadNotificationCount(store: AppStore, userId: ID) {
+  return store.notifications.filter((item) => item.userId === userId && !item.readAt && !item.archivedAt).length;
+}
+
+export function markNotificationRead(store: AppStore, userId: ID, notificationId: ID) {
+  const item = store.notifications.find((notification) => notification.id === notificationId && notification.userId === userId);
+  if (!item) throw new Error("Notification not found");
+  item.readAt = item.readAt ?? new Date().toISOString();
+  return item;
+}
+
+export function markAllNotificationsRead(store: AppStore, userId: ID) {
+  const now = new Date().toISOString();
+  for (const item of store.notifications.filter((notification) => notification.userId === userId && !notification.readAt)) item.readAt = now;
+  return { ok: true };
+}
+
+export function archiveNotification(store: AppStore, userId: ID, notificationId: ID) {
+  const item = markNotificationRead(store, userId, notificationId);
+  item.archivedAt = new Date().toISOString();
+  return item;
+}
+
+export function deleteNotification(store: AppStore, userId: ID, notificationId: ID) {
+  store.notifications = store.notifications.filter((item) => !(item.id === notificationId && item.userId === userId));
+  return { ok: true };
+}
+
+function notify(store: AppStore, input: Omit<AppNotification, "id" | "metadata" | "createdAt"> & { metadata?: Record<string, unknown> }) {
+  if (store.notifications.some((item) => item.deduplicationKey === input.deduplicationKey)) return;
+  const metadata = {
+    destinationType: input.entityType ?? input.type,
+    ...(input.entityId ? { destinationId: input.entityId } : {}),
+    ...(input.metadata ?? {})
+  };
+  store.notifications.push({ ...input, id: `notification_${Date.now()}_${store.notifications.length + 1}`, metadata, createdAt: new Date().toISOString() });
+}
+
+function displayName(store: AppStore, userId: ID) { return store.users.find((user) => user.id === userId)?.displayName ?? "A friend"; }
 
 export function weeklyRecapFor(store: AppStore, userId: ID, weekStartsOn?: string) {
   const resolvedWeekStart = weekStartsOn ?? startOfWeek(currentDateForUser(store, userId));
@@ -838,6 +920,53 @@ export function profileRecords(store: AppStore, userId: ID) {
     highestDailySteps: highestSteps || undefined,
     longestActivitySeconds: longestActivity || undefined
   };
+}
+
+export function activitySummariesFor(store: AppStore, userId: ID, from?: string, to?: string) {
+  return store.summaries.filter((item) => item.userId === userId && (!from || item.localDate >= from) && (!to || item.localDate <= to));
+}
+
+export function activityWorkoutsFor(store: AppStore, userId: ID, input: { from?: string; to?: string; type?: string; limit?: number; before?: string }) {
+  return store.workouts.filter((item) => item.userId === userId && (!input.from || item.startedAt.slice(0, 10) >= input.from) && (!input.to || item.startedAt.slice(0, 10) <= input.to) && (!input.type || item.activityType === input.type) && (!input.before || item.startedAt < input.before))
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, Math.min(Math.max(input.limit ?? 50, 1), 200));
+}
+
+export function activityAggregatesFor(store: AppStore, userId: ID, weeks = 13) {
+  const today = currentDateForUser(store, userId);
+  const currentWeek = startOfWeek(today);
+  return Array.from({ length: Math.min(Math.max(weeks, 1), 104) }, (_, offset) => {
+    const weekStartsOn = addLocalDays(currentWeek, -(weeks - offset - 1) * 7);
+    const weekEndsOn = addLocalDays(weekStartsOn, 6);
+    const summaries = activitySummariesFor(store, userId, weekStartsOn, weekEndsOn);
+    const workouts = store.workouts.filter((item) => item.userId === userId && item.startedAt.slice(0, 10) >= weekStartsOn && item.startedAt.slice(0, 10) <= weekEndsOn);
+    return { weekStartsOn, steps: summaries.reduce((sum, item) => sum + item.steps, 0), walkingDistanceMeters: summaries.reduce((sum, item) => sum + item.walkingDistanceMeters, 0), runningDistanceMeters: summaries.reduce((sum, item) => sum + item.runningDistanceMeters, 0), activeMinutes: summaries.reduce((sum, item) => sum + item.activeMinutes, 0), calories: summaries.reduce((sum, item) => sum + item.calories, 0), strengthSessions: workouts.filter((item) => item.activityType === "strengthTraining").length };
+  });
+}
+
+export function lifetimePersonalBests(store: AppStore, userId: ID) {
+  const summaries = store.summaries.filter((item) => item.userId === userId);
+  const workouts = store.workouts.filter((item) => item.userId === userId);
+  const runs = workouts.filter((item) => item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
+  const fastest = (meters: number) => runs.filter((item) => item.distanceMeters >= meters).map((item) => ({ workout: item, elapsedSeconds: Math.round(item.durationSeconds * meters / item.distanceMeters), paceSecondsPerKm: Math.round(item.durationSeconds / (item.distanceMeters / 1000)) })).sort((a, b) => a.elapsedSeconds - b.elapsedSeconds).slice(0, 5);
+  return {
+    fastest1K: fastest(1000), fastest5K: fastest(5000), fastest10K: fastest(10000), fastestHalfMarathon: fastest(21097.5),
+    highestStepDays: [...summaries].sort((a, b) => b.steps - a.steps).slice(0, 5),
+    longestWalks: workouts.filter((item) => item.activityType === "walking").sort((a, b) => b.distanceMeters - a.distanceMeters).slice(0, 5),
+    longestActivities: [...workouts].sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 5),
+    longestStrengthSessions: workouts.filter((item) => item.activityType === "strengthTraining").sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 5),
+    highestActiveMinuteDays: [...summaries].sort((a, b) => b.activeMinutes - a.activeMinutes).slice(0, 5)
+  };
+}
+
+export function personalBestsFor(store: AppStore, viewerId: ID, userId: ID) {
+  const status = friendshipStatus(store, viewerId, userId);
+  const privacy = store.settings.find((item) => item.userId === userId);
+  if (viewerId !== userId && (status !== "accepted" || privacy?.hideActivityFromFriends || privacy?.hideExactNumbers)) throw new Error("Activity is not visible");
+  return lifetimePersonalBests(store, userId);
+}
+
+export function userSummaries(store: AppStore, viewerId: ID, ids: ID[]) {
+  return unique(ids).slice(0, 100).map((id) => publicProfile(store, viewerId, id));
 }
 
 function refreshDerived(store: AppStore, userId: ID) {
@@ -915,9 +1044,18 @@ export function addDailyGroupChallengeUpdates(store: AppStore, now = new Date())
       .join(" | ");
     const body = `${challenge.title} progress for ${localDate}: ${ranking || "No activity recorded yet."}`;
     store.messages.push(systemMessage(messageId, challenge.sharedConversationId, body, now.toISOString()));
+    for (const participant of challenge.participants.filter((item) => item.accepted)) notify(store, { userId: participant.userId, type: "challengeUpdate", entityType: "challenge", entityId: challenge.id, title: "Challenge progress", body, deduplicationKey: `challenge-daily:${challenge.id}:${localDate}:${participant.userId}` });
     changed.push(challenge.id);
   }
   return changed;
+}
+
+export function generateScheduledNotifications(store: AppStore) {
+  for (const user of store.users) {
+    const today = currentDateForUser(store, user.id);
+    const weekStartsOn = startOfWeek(today);
+    if (today === weekStartsOn) notify(store, { userId: user.id, type: "recap", entityType: "recap", entityId: `recap_${user.id}_${addLocalDays(weekStartsOn, -7)}`, title: "Your weekly recap is ready", body: "See your totals, goals, streak, and best day from last week.", deduplicationKey: `weekly-recap:${user.id}:${weekStartsOn}` });
+  }
 }
 
 function addMilestoneMessages(store: AppStore, userId: ID, milestone: string) {
