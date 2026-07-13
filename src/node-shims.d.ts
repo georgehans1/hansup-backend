@@ -4,11 +4,13 @@ declare const process: {
 
 declare const Buffer: {
   isBuffer(value: unknown): boolean;
-  from(value: string, encoding?: string): { toString(encoding?: string): string };
-  from(value: unknown): { toString(encoding?: string): string };
+  from(value: string, encoding?: string): { length: number; toString(encoding?: string): string };
+  from(value: unknown): { length: number; toString(encoding?: string): string };
   concat(values: unknown[]): { toString(encoding?: string): string };
   byteLength(value: string): number;
 };
+
+declare function setInterval(callback: () => void | Promise<void>, milliseconds: number): { unref(): void };
 
 declare function fetch(url: string): Promise<{
   ok: boolean;

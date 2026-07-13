@@ -47,6 +47,7 @@ test("calculates goal progress and current streak", () => {
     kind: "steps",
     cadence: "daily",
     target: 10000,
+    isEnabled: true,
     createdAt: new Date().toISOString()
   };
 

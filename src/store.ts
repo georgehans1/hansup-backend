@@ -101,10 +101,10 @@ export function createDemoStore(): AppStore {
   ];
 
   const goals: Goal[] = [
-    { id: "g_ama_steps", userId: "u_ama", kind: "steps", cadence: "daily", target: 10000, createdAt: now },
-    { id: "g_ama_distance", userId: "u_ama", kind: "distance", cadence: "weekly", target: 50000, createdAt: now },
-    { id: "g_kofi_run", userId: "u_kofi", kind: "running", cadence: "weekly", target: 15000, createdAt: now },
-    { id: "g_maya_steps", userId: "u_maya", kind: "steps", cadence: "daily", target: 12000, createdAt: now }
+    { id: "g_ama_steps", userId: "u_ama", kind: "steps", cadence: "daily", target: 10000, isEnabled: true, createdAt: now },
+    { id: "g_ama_distance", userId: "u_ama", kind: "distance", cadence: "weekly", target: 50000, isEnabled: true, createdAt: now },
+    { id: "g_kofi_run", userId: "u_kofi", kind: "running", cadence: "weekly", target: 15000, isEnabled: true, createdAt: now },
+    { id: "g_maya_steps", userId: "u_maya", kind: "steps", cadence: "daily", target: 12000, isEnabled: true, createdAt: now }
   ];
 
   const streaks: Streak[] = [
@@ -239,7 +239,8 @@ export function authWithIdentity(store: AppStore, identity: VerifiedIdentity, to
   if (!saved) {
     const suffix = Math.random().toString(36).slice(2, 9);
     const id = `u_${slug(email.split("@")[0])}_${suffix}`;
-    saved = user(id, `user_${suffix}`, identity.displayName ?? email.split("@")[0], email, "#44d9e8", new Date().toISOString());
+    const username = `user_${suffix}`;
+    saved = user(id, username, username, email, "#44d9e8", new Date().toISOString());
     store.users.push(saved);
     store.settings.push({
       userId: saved.id,
@@ -277,11 +278,15 @@ export function updateUserProfile(store: AppStore, userId: ID, patch: { username
       throw new Error("Username is already taken");
     }
     user.username = username;
-  }
-  if (patch.displayName !== undefined) {
-    const displayName = patch.displayName.trim();
-    if (displayName.length < 2) throw new Error("Display name must be at least 2 characters");
-    user.displayName = displayName;
+    user.displayName = username;
+  } else if (patch.displayName !== undefined) {
+    const username = slug(patch.displayName);
+    if (username.length < 3) throw new Error("Username must be at least 3 characters");
+    if (store.users.some((item) => item.id !== userId && item.username.toLowerCase() === username.toLowerCase())) {
+      throw new Error("Username is already taken");
+    }
+    user.username = username;
+    user.displayName = username;
   }
   if (patch.avatarURL !== undefined) user.avatarURL = patch.avatarURL;
   return user;
@@ -502,13 +507,13 @@ export function addGoal(store: AppStore, goal: Omit<Goal, "id" | "createdAt">): 
   if (store.goals.some((item) => item.userId === goal.userId && item.kind === goal.kind && item.cadence === goal.cadence)) {
     throw new Error("An active goal already exists for this metric and frequency");
   }
-  const saved: Goal = { ...goal, id: `goal_${store.goals.length + 1}`, createdAt: new Date().toISOString() };
+  const saved: Goal = { ...goal, isEnabled: goal.isEnabled ?? true, id: `goal_${store.goals.length + 1}`, createdAt: new Date().toISOString() };
   store.goals.push(saved);
   refreshDerived(store, goal.userId);
   return saved;
 }
 
-export function updateGoal(store: AppStore, userId: ID, goalId: ID, patch: Partial<Pick<Goal, "kind" | "cadence" | "target">>): Goal {
+export function updateGoal(store: AppStore, userId: ID, goalId: ID, patch: Partial<Pick<Goal, "kind" | "cadence" | "target" | "isEnabled">>): Goal {
   const goal = store.goals.find((item) => item.id === goalId && item.userId === userId);
   if (!goal) throw new Error("Goal not found");
   const next = { ...goal, ...patch };
@@ -832,7 +837,7 @@ function refreshChallenge(store: AppStore, challenge: Challenge) {
     if (!participant.accepted) continue;
     const summaries = store.summaries.filter((item) => item.userId === participant.userId && item.localDate >= challenge.startsOn && item.localDate <= challenge.endsOn);
     if (challenge.kind === "strengthTraining") {
-      participant.score = store.workouts.filter((item) => item.userId === participant.userId && item.activityType === "strengthTraining" && item.startedAt.slice(0, 10) >= challenge.startsOn && item.startedAt.slice(0, 10) <= challenge.endsOn).reduce((sum, item) => sum + item.durationSeconds / 60, 0);
+      participant.score = store.workouts.filter((item) => item.userId === participant.userId && item.activityType === "strengthTraining" && item.startedAt.slice(0, 10) >= challenge.startsOn && item.startedAt.slice(0, 10) <= challenge.endsOn).length;
     } else {
       participant.score = scoreChallenge(challenge.kind, summaries);
     }
@@ -846,6 +851,16 @@ function refreshChallenge(store: AppStore, challenge: Challenge) {
   else challenge.status = "inviting";
 }
 
+export function refreshAllChallenges(store: AppStore): ID[] {
+  const changed: ID[] = [];
+  for (const challenge of store.challenges) {
+    const previous = JSON.stringify({ status: challenge.status, participants: challenge.participants });
+    refreshChallenge(store, challenge);
+    if (previous !== JSON.stringify({ status: challenge.status, participants: challenge.participants })) changed.push(challenge.id);
+  }
+  return changed;
+}
+
 function addMilestoneMessages(store: AppStore, userId: ID, milestone: string) {
   const name = store.users.find((item) => item.id === userId)?.displayName ?? "A friend";
   const conversationIds = store.conversationMembers.filter((item) => item.userId === userId).map((item) => item.conversationId);
@@ -857,7 +872,7 @@ function addMilestoneMessages(store: AppStore, userId: ID, milestone: string) {
 }
 
 function goalsForStreak(store: AppStore, userId: ID): Goal[] {
-  const dailyGoals = store.goals.filter((goal) => goal.userId === userId && goal.cadence === "daily");
+  const dailyGoals = store.goals.filter((goal) => goal.userId === userId && goal.cadence === "daily" && goal.isEnabled);
   if (dailyGoals.length > 0) return dailyGoals;
   return [
     {
@@ -866,6 +881,7 @@ function goalsForStreak(store: AppStore, userId: ID): Goal[] {
       kind: "steps",
       cadence: "daily",
       target: 10000,
+      isEnabled: true,
       createdAt: new Date().toISOString()
     }
   ];

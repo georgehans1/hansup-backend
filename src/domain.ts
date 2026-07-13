@@ -106,6 +106,7 @@ export interface Goal {
   kind: ActivityKind;
   cadence: GoalCadence;
   target: number;
+  isEnabled: boolean;
   createdAt: string;
 }
 
