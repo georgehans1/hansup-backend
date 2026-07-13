@@ -169,12 +169,13 @@ export function createServer(
 
       const userActivity = url.pathname.match(/^\/users\/([^/]+)\/activity$/);
       if (req.method === "GET" && userActivity) {
-        return json(res, 200, profileActivity(store, userId, userActivity[1]));
+        return json(res, 200, profileActivity(store, userId, userActivity[1], url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined));
       }
 
       if (req.method === "GET" && url.pathname === "/friends") {
         return json(res, 200, {
           friends: friendsFor(store, userId),
+          friendships: store.friendships.filter((item) => item.status === "accepted" && (item.requesterId === userId || item.addresseeId === userId)),
           requests: store.friendships.filter((item) => item.addresseeId === userId && item.status === "pending")
         });
       }

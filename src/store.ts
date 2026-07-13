@@ -334,7 +334,7 @@ export function publicProfile(store: AppStore, viewerId: ID, userId: ID) {
   };
 }
 
-export function profileActivity(store: AppStore, viewerId: ID, userId: ID) {
+export function profileActivity(store: AppStore, viewerId: ID, userId: ID, from?: string, to?: string) {
   const status = friendshipStatus(store, viewerId, userId);
   const privacy = store.settings.find((item) => item.userId === userId);
   if (viewerId !== userId && status !== "accepted") {
@@ -344,10 +344,11 @@ export function profileActivity(store: AppStore, viewerId: ID, userId: ID) {
     return { profile: publicProfile(store, viewerId, userId), summaries: [], workouts: [], feed: [], stats: undefined, records: undefined, badges: [], activityHidden: true, exactNumbersHidden: false };
   }
   const hideExact = viewerId !== userId && Boolean(privacy?.hideExactNumbers);
+  const inRange = (date: string) => (!from || date >= from) && (!to || date <= to);
   return {
     profile: publicProfile(store, viewerId, userId),
-    summaries: hideExact ? [] : store.summaries.filter((summary) => summary.userId === userId),
-    workouts: store.workouts.filter((workout) => workout.userId === userId).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout),
+    summaries: hideExact ? [] : store.summaries.filter((summary) => summary.userId === userId && inRange(summary.localDate)),
+    workouts: store.workouts.filter((workout) => workout.userId === userId && inRange(workout.startedAt.slice(0, 10))).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout),
     feed: store.feed.filter((item) => item.userId === userId),
     stats: hideExact ? undefined : profileStats(store, userId),
     records: hideExact ? undefined : profileRecords(store, userId),
