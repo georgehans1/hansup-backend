@@ -14,6 +14,7 @@ import {
   createDemoStore,
   currentUser,
   friendLeaderboard,
+  friendActivity,
   friendsFor,
   markConversationRead,
   messagesForConversation,
@@ -28,6 +29,9 @@ import {
   sendFriendRequest,
   shareChallenge,
   updateUserSettings,
+  updateUserProfile,
+  updateGoal,
+  deleteGoal,
   upsertSummary,
   upsertWorkouts,
   weeklyRecapFor
@@ -102,6 +106,12 @@ export function createServer(
         return json(res, 200, currentUser(store, userId));
       }
 
+      if (req.method === "PATCH" && url.pathname === "/me") {
+        const result = updateUserProfile(store, userId, await body(req));
+        await onChange({ kind: "auth", userId });
+        return json(res, 200, result);
+      }
+
       if (req.method === "PATCH" && url.pathname === "/me/settings") {
         const result = updateUserSettings(store, userId, await body(req));
         await onChange({ kind: "settings", userId });
@@ -109,7 +119,7 @@ export function createServer(
       }
 
       if (req.method === "GET" && url.pathname === "/users/search") {
-        return json(res, 200, searchUsers(store, userId, url.searchParams.get("q") ?? ""));
+        return json(res, 200, searchUsers(store, userId, url.searchParams.get("q") ?? "", numberParam(url, "limit", 20), numberParam(url, "offset", 0)));
       }
 
       const userProfile = url.pathname.match(/^\/users\/([^/]+)$/);
@@ -127,6 +137,10 @@ export function createServer(
           friends: friendsFor(store, userId),
           requests: store.friendships.filter((item) => item.addresseeId === userId && item.status === "pending")
         });
+      }
+
+      if (req.method === "GET" && url.pathname === "/feed/friends") {
+        return json(res, 200, friendActivity(store, userId, numberParam(url, "limit", 20), numberParam(url, "offset", 0)));
       }
 
       if (req.method === "POST" && url.pathname === "/friends/requests") {
@@ -176,9 +190,22 @@ export function createServer(
       }
 
       if (req.method === "POST" && url.pathname === "/goals") {
-        const result = addGoal(store, await body(req));
+        const payload = await body<Omit<Parameters<typeof addGoal>[1], "userId">>(req);
+        const result = addGoal(store, { ...payload, userId });
         await onChange({ kind: "goal", goalId: result.id, userId: result.userId });
         return json(res, 201, result);
+      }
+
+      const goalRoute = url.pathname.match(/^\/goals\/([^/]+)$/);
+      if (req.method === "PATCH" && goalRoute) {
+        const result = updateGoal(store, userId, goalRoute[1], await body(req));
+        await onChange({ kind: "goal", goalId: result.id, userId });
+        return json(res, 200, result);
+      }
+      if (req.method === "DELETE" && goalRoute) {
+        const result = deleteGoal(store, userId, goalRoute[1]);
+        await onChange({ kind: "goal-delete", goalId: goalRoute[1], userId });
+        return json(res, 200, result);
       }
 
       if (req.method === "GET" && url.pathname === "/conversations") {
@@ -317,4 +344,9 @@ async function body<T>(req: any): Promise<T> {
 
 function period(value: string | null): LeaderboardPeriod {
   return value === "today" || value === "week" || value === "month" || value === "all" ? value : "week";
+}
+
+function numberParam(url: URL, name: string, fallback: number): number {
+  const value = Number(url.searchParams.get(name));
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }

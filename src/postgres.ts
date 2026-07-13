@@ -30,6 +30,7 @@ export type PersistenceChange =
   | { kind: "summary"; summaryId: string; userId: string }
   | { kind: "workouts"; workoutIds: string[] }
   | { kind: "goal"; goalId: string; userId: string }
+  | { kind: "goal-delete"; goalId: string; userId: string }
   | { kind: "conversation"; conversationId: string }
   | { kind: "message"; messageId: string }
   | { kind: "conversation-read"; conversationId: string; userId: string }
@@ -219,6 +220,10 @@ export class PostgresRepository {
         await this.insertGoal(required(store.goals.find((item) => item.id === change.goalId), "Goal"));
         await this.persistDerivedActivity(store, change.userId);
         return;
+      case "goal-delete":
+        await this.query("delete from goals where id = $1 and user_id = $2", [change.goalId, change.userId]);
+        await this.persistDerivedActivity(store, change.userId);
+        return;
       case "conversation": {
         await this.insertConversation(required(store.conversations.find((item) => item.id === change.conversationId), "Conversation"));
         for (const member of store.conversationMembers.filter((item) => item.conversationId === change.conversationId)) {
@@ -310,6 +315,10 @@ export class PostgresRepository {
         statements: [
           "create table if not exists workout_summaries (id text primary key, user_id text not null references users(id) on delete cascade, healthkit_uuid text not null, activity_type text not null check (activity_type in ('walking', 'running', 'strengthTraining')), started_at timestamptz not null, ended_at timestamptz not null, duration_seconds double precision not null default 0, distance_meters double precision not null default 0, calories double precision not null default 0, source text not null default 'healthkit', trust_level text not null default 'verified', updated_at timestamptz not null default now(), unique(user_id, healthkit_uuid))"
         ]
+      },
+      {
+        id: "003_profile_avatar",
+        statements: ["alter table users add column if not exists avatar_url text"]
       }
     ];
     for (const migration of migrations) {
@@ -390,11 +399,12 @@ export class PostgresRepository {
 
   private insertUser(user: User) {
     return this.query(
-      `insert into users (id, username, display_name, email, phone, avatar_color, joined_at, searchable)
-       values ($1, $2, $3, $4, $5, $6, $7, $8)
+      `insert into users (id, username, display_name, email, phone, avatar_color, avatar_url, joined_at, searchable)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        on conflict (id) do update set username = excluded.username, display_name = excluded.display_name,
-         email = excluded.email, phone = excluded.phone, avatar_color = excluded.avatar_color, searchable = excluded.searchable`,
-      [user.id, user.username, user.displayName, user.email, user.phone, user.avatarColor, user.joinedAt, user.searchable]
+         email = excluded.email, phone = excluded.phone, avatar_color = excluded.avatar_color,
+         avatar_url = excluded.avatar_url, searchable = excluded.searchable`,
+      [user.id, user.username, user.displayName, user.email, user.phone, user.avatarColor, user.avatarURL, user.joinedAt, user.searchable]
     );
   }
 
@@ -593,6 +603,7 @@ function mapUser(row: any): User {
     email: row.email,
     phone: row.phone,
     avatarColor: row.avatar_color,
+    avatarURL: row.avatar_url,
     joinedAt: dateString(row.joined_at),
     searchable: row.searchable
   };
