@@ -335,7 +335,7 @@ export function createServer(
       if (req.method === "POST" && url.pathname === "/challenges") {
         const payload = await body<Omit<Parameters<typeof addChallenge>[1], "creatorId">>(req);
         const result = addChallenge(store, { ...payload, creatorId: userId });
-        await onChange({ kind: "challenge", challengeId: result.id });
+        await onChange({ kind: "challenge", challengeId: result.id, includeSharedMessages: Boolean(result.sharedConversationId) });
         return json(res, 201, result);
       }
 
