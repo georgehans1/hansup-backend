@@ -75,7 +75,7 @@ declare module "node:fs" {
 
 declare module "pg" {
   export class Pool {
-    constructor(config: { connectionString: string; ssl?: boolean });
+    constructor(config: { connectionString: string; ssl?: boolean | { ca?: string; rejectUnauthorized: boolean } });
     query(sql: string, params?: unknown[]): Promise<{ rows: any[] }>;
   }
 }

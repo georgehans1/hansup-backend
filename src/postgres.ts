@@ -326,9 +326,18 @@ export async function createProductionRepository(databaseUrl: string): Promise<P
   const pg = await import("pg");
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("supabase.") || process.env.DATABASE_SSL === "true"
+    ssl: databaseSslOptions(databaseUrl)
   });
   return new PostgresRepository((sql, params) => pool.query(sql, params));
+}
+
+function databaseSslOptions(databaseUrl: string): boolean | { ca?: string; rejectUnauthorized: boolean } | undefined {
+  const sslRequired = databaseUrl.includes("supabase.") || process.env.DATABASE_SSL === "true";
+  if (!sslRequired) return undefined;
+
+  const ca = process.env.DATABASE_CA_CERT?.replace(/\\n/g, "\n");
+  const rejectUnauthorized = process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false";
+  return ca ? { ca, rejectUnauthorized } : { rejectUnauthorized };
 }
 
 export async function createProductionSeedStore(databaseUrl?: string, useDemoData = false): Promise<AppStore> {

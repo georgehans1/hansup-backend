@@ -14,7 +14,11 @@ services:
         value: "false"
       - key: DATABASE_SSL
         value: "true"
+      - key: DATABASE_SSL_REJECT_UNAUTHORIZED
+        value: "true"
       - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_CA_CERT
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
