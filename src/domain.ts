@@ -25,6 +25,7 @@ export interface User {
   email?: string;
   phone?: string;
   avatarColor?: string;
+  avatarURL?: string;
   joinedAt: string;
   searchable: boolean;
 }
@@ -34,6 +35,7 @@ export interface PublicUserProfile {
   username: string;
   displayName: string;
   avatarColor?: string;
+  avatarURL?: string;
   joinedAt: string;
   friendshipStatus?: FriendshipStatus;
 }

@@ -5,6 +5,7 @@ CREATE TABLE users (
   email text UNIQUE,
   phone text,
   avatar_color text,
+  avatar_url text,
   joined_at timestamptz NOT NULL DEFAULT now(),
   searchable boolean NOT NULL DEFAULT true
 );

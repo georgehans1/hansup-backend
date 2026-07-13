@@ -232,9 +232,11 @@ export function googleAuth(store: AppStore, input: { idToken: string; email?: st
 export function authWithIdentity(store: AppStore, identity: VerifiedIdentity, tokenSecret: string): TokenPair & { user: User; needsUsername: boolean } {
   const email = identity.email ?? `${identity.subject}@${identity.provider}.local`;
   let saved = store.users.find((item) => item.email === email);
+  const isNewUser = !saved;
   if (!saved) {
-    const id = `u_${slug(email.split("@")[0])}`;
-    saved = user(id, slug(email.split("@")[0]), identity.displayName ?? email.split("@")[0], email, "#44d9e8", new Date().toISOString());
+    const suffix = Math.random().toString(36).slice(2, 9);
+    const id = `u_${slug(email.split("@")[0])}_${suffix}`;
+    saved = user(id, `user_${suffix}`, identity.displayName ?? email.split("@")[0], email, "#44d9e8", new Date().toISOString());
     store.users.push(saved);
     store.settings.push({
       userId: saved.id,
@@ -248,7 +250,7 @@ export function authWithIdentity(store: AppStore, identity: VerifiedIdentity, to
     });
     store.streaks.push({ userId: saved.id, currentDays: 0, bestDays: 0, updatedAt: new Date().toISOString() });
   }
-  return { ...issueDemoTokens(saved.id, tokenSecret), user: saved, needsUsername: !saved.username };
+  return { ...issueDemoTokens(saved.id, tokenSecret), user: saved, needsUsername: isNewUser };
 }
 
 export function currentUser(store: AppStore, userId = "u_ama") {
@@ -258,8 +260,28 @@ export function currentUser(store: AppStore, userId = "u_ama") {
     settings: store.settings.find((item) => item.userId === userId),
     profileStats: profileStats(store, userId),
     streak: store.streaks.find((item) => item.userId === userId),
+    goals: store.goals.filter((item) => item.userId === userId),
     badges: badgesForUser(store, userId)
   };
+}
+
+export function updateUserProfile(store: AppStore, userId: ID, patch: { username?: string; displayName?: string; avatarURL?: string }): User {
+  const user = requireUser(store, userId);
+  if (patch.username !== undefined) {
+    const username = slug(patch.username);
+    if (username.length < 3) throw new Error("Username must be at least 3 characters");
+    if (store.users.some((item) => item.id !== userId && item.username.toLowerCase() === username.toLowerCase())) {
+      throw new Error("Username is already taken");
+    }
+    user.username = username;
+  }
+  if (patch.displayName !== undefined) {
+    const displayName = patch.displayName.trim();
+    if (displayName.length < 2) throw new Error("Display name must be at least 2 characters");
+    user.displayName = displayName;
+  }
+  if (patch.avatarURL !== undefined) user.avatarURL = patch.avatarURL;
+  return user;
 }
 
 export function updateUserSettings(store: AppStore, userId: ID, patch: Partial<UserSettings>): UserSettings {
@@ -271,11 +293,12 @@ export function updateUserSettings(store: AppStore, userId: ID, patch: Partial<U
   return current;
 }
 
-export function searchUsers(store: AppStore, viewerId: ID, query: string) {
+export function searchUsers(store: AppStore, viewerId: ID, query: string, limit = 20, offset = 0) {
   const lowered = query.trim().toLowerCase();
   return store.users
     .filter((item) => item.id !== viewerId && item.searchable)
     .filter((item) => item.username.toLowerCase().includes(lowered) || item.email?.toLowerCase().includes(lowered) || item.displayName.toLowerCase().includes(lowered))
+    .slice(offset, offset + Math.min(Math.max(limit, 1), 50))
     .map((item) => publicProfile(store, viewerId, item.id));
 }
 
@@ -286,6 +309,7 @@ export function publicProfile(store: AppStore, viewerId: ID, userId: ID) {
     username: user.username,
     displayName: user.displayName,
     avatarColor: user.avatarColor,
+    avatarURL: user.avatarURL,
     joinedAt: user.joinedAt,
     friendshipStatus: friendshipStatus(store, viewerId, userId)
   };
@@ -293,17 +317,36 @@ export function publicProfile(store: AppStore, viewerId: ID, userId: ID) {
 
 export function profileActivity(store: AppStore, viewerId: ID, userId: ID) {
   const status = friendshipStatus(store, viewerId, userId);
+  const privacy = store.settings.find((item) => item.userId === userId);
   if (viewerId !== userId && status !== "accepted") {
-    return { profile: publicProfile(store, viewerId, userId), summaries: [], workouts: [], feed: [], stats: undefined, badges: [] };
+    return { profile: publicProfile(store, viewerId, userId), summaries: [], workouts: [], feed: [], stats: undefined, records: undefined, badges: [], activityHidden: true, exactNumbersHidden: false };
   }
+  if (viewerId !== userId && privacy?.hideActivityFromFriends) {
+    return { profile: publicProfile(store, viewerId, userId), summaries: [], workouts: [], feed: [], stats: undefined, records: undefined, badges: [], activityHidden: true, exactNumbersHidden: false };
+  }
+  const hideExact = viewerId !== userId && Boolean(privacy?.hideExactNumbers);
   return {
     profile: publicProfile(store, viewerId, userId),
-    summaries: store.summaries.filter((summary) => summary.userId === userId),
-    workouts: store.workouts.filter((workout) => workout.userId === userId).sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
+    summaries: hideExact ? [] : store.summaries.filter((summary) => summary.userId === userId),
+    workouts: store.workouts.filter((workout) => workout.userId === userId).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout),
     feed: store.feed.filter((item) => item.userId === userId),
-    stats: profileStats(store, userId),
-    badges: badgesForUser(store, userId)
+    stats: hideExact ? undefined : profileStats(store, userId),
+    records: hideExact ? undefined : profileRecords(store, userId),
+    badges: badgesForUser(store, userId),
+    activityHidden: false,
+    exactNumbersHidden: hideExact
   };
+}
+
+export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset = 0) {
+  const friendIds = new Set(friendsFor(store, viewerId).map((user) => user.id));
+  return store.workouts
+    .filter((workout) => friendIds.has(workout.userId) && !store.settings.find((item) => item.userId === workout.userId)?.hideActivityFromFriends)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    .slice(offset, offset + Math.min(Math.max(limit, 1), 50))
+    .map((workout) => store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers
+      ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 }
+      : workout);
 }
 
 export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
@@ -396,10 +439,35 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
 }
 
 export function addGoal(store: AppStore, goal: Omit<Goal, "id" | "createdAt">): Goal {
+  if (goal.target <= 0) throw new Error("Goal target must be greater than zero");
+  if (store.goals.some((item) => item.userId === goal.userId && item.kind === goal.kind && item.cadence === goal.cadence)) {
+    throw new Error("An active goal already exists for this metric and frequency");
+  }
   const saved: Goal = { ...goal, id: `goal_${store.goals.length + 1}`, createdAt: new Date().toISOString() };
   store.goals.push(saved);
   refreshDerived(store, goal.userId);
   return saved;
+}
+
+export function updateGoal(store: AppStore, userId: ID, goalId: ID, patch: Partial<Pick<Goal, "kind" | "cadence" | "target">>): Goal {
+  const goal = store.goals.find((item) => item.id === goalId && item.userId === userId);
+  if (!goal) throw new Error("Goal not found");
+  const next = { ...goal, ...patch };
+  if (next.target <= 0) throw new Error("Goal target must be greater than zero");
+  if (store.goals.some((item) => item.id !== goal.id && item.userId === userId && item.kind === next.kind && item.cadence === next.cadence)) {
+    throw new Error("An active goal already exists for this metric and frequency");
+  }
+  Object.assign(goal, next);
+  refreshDerived(store, userId);
+  return goal;
+}
+
+export function deleteGoal(store: AppStore, userId: ID, goalId: ID) {
+  const before = store.goals.length;
+  store.goals = store.goals.filter((item) => !(item.id === goalId && item.userId === userId));
+  if (store.goals.length === before) throw new Error("Goal not found");
+  refreshDerived(store, userId);
+  return { ok: true };
 }
 
 export function friendLeaderboard(store: AppStore, userId: ID, period: LeaderboardPeriod): ActivityComparison {
@@ -585,6 +653,28 @@ export function profileStats(store: AppStore, userId: ID): ProfileStats {
     challengeWins,
     bestStreak: store.streaks.find((item) => item.userId === userId)?.bestDays ?? 0,
     goalsHit: store.goals.filter((goal) => goal.userId === userId).length + Math.floor(lifetimeSteps / 50000)
+  };
+}
+
+export function profileRecords(store: AppStore, userId: ID) {
+  const workouts = store.workouts.filter((item) => item.userId === userId);
+  const running = workouts.filter((item) => item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
+  const fastest = (meters: number) => {
+    const eligible = running.filter((item) => item.distanceMeters >= meters);
+    if (eligible.length === 0) return undefined;
+    return Math.round(Math.min(...eligible.map((item) => item.durationSeconds * meters / item.distanceMeters)));
+  };
+  const longestWalk = Math.max(0, ...workouts.filter((item) => item.activityType === "walking").map((item) => item.distanceMeters));
+  const longestActivity = Math.max(0, ...workouts.map((item) => item.durationSeconds));
+  const highestSteps = Math.max(0, ...store.summaries.filter((item) => item.userId === userId).map((item) => item.steps));
+  return {
+    fastest1KSeconds: fastest(1000),
+    fastest5KSeconds: fastest(5000),
+    fastest10KSeconds: fastest(10000),
+    fastestHalfMarathonSeconds: fastest(21097.5),
+    longestWalkMeters: longestWalk || undefined,
+    highestDailySteps: highestSteps || undefined,
+    longestActivitySeconds: longestActivity || undefined
   };
 }
 
