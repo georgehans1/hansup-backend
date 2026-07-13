@@ -1,6 +1,6 @@
 import http from "node:http";
 import { URL } from "node:url";
-import { storeAvatar } from "./storage.js";
+import { deleteAvatar, storeAvatar } from "./storage.js";
 import {
   addChallenge,
   addGoal,
@@ -145,6 +145,7 @@ export function createServer(
       if (req.method === "PATCH" && url.pathname === "/me") {
         const patch = await body<{ username?: string; displayName?: string; avatarURL?: string }>(req);
         if (patch.avatarURL?.startsWith("data:image/")) patch.avatarURL = await storeAvatar(config, userId, patch.avatarURL);
+        else if (patch.avatarURL === "") await deleteAvatar(config, userId);
         const result = updateUserProfile(store, userId, patch);
         await onChange({ kind: "auth", userId });
         return json(res, 200, result);
