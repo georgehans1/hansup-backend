@@ -2,6 +2,9 @@ export interface ProductionConfig {
   databaseUrl?: string;
   googleClientId?: string;
   jwtSecret?: string;
+  supabaseUrl?: string;
+  supabaseServiceRoleKey?: string;
+  supabaseAvatarBucket?: string;
   apnsTeamId?: string;
   apnsKeyId?: string;
   apnsBundleId?: string;
@@ -14,6 +17,9 @@ export function productionConfig(env: Record<string, string | undefined> = proce
     databaseUrl: env.DATABASE_URL,
     googleClientId: env.GOOGLE_CLIENT_ID,
     jwtSecret: env.JWT_SECRET,
+    supabaseUrl: env.SUPABASE_URL,
+    supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+    supabaseAvatarBucket: env.SUPABASE_AVATAR_BUCKET ?? "avatars",
     apnsTeamId: env.APNS_TEAM_ID,
     apnsKeyId: env.APNS_KEY_ID,
     apnsBundleId: env.APNS_BUNDLE_ID,

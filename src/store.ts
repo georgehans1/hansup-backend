@@ -837,7 +837,7 @@ function refreshChallenge(store: AppStore, challenge: Challenge) {
     if (!participant.accepted) continue;
     const summaries = store.summaries.filter((item) => item.userId === participant.userId && item.localDate >= challenge.startsOn && item.localDate <= challenge.endsOn);
     if (challenge.kind === "strengthTraining") {
-      participant.score = store.workouts.filter((item) => item.userId === participant.userId && item.activityType === "strengthTraining" && item.startedAt.slice(0, 10) >= challenge.startsOn && item.startedAt.slice(0, 10) <= challenge.endsOn).reduce((sum, item) => sum + item.durationSeconds / 60, 0);
+      participant.score = store.workouts.filter((item) => item.userId === participant.userId && item.activityType === "strengthTraining" && item.startedAt.slice(0, 10) >= challenge.startsOn && item.startedAt.slice(0, 10) <= challenge.endsOn).length;
     } else {
       participant.score = scoreChallenge(challenge.kind, summaries);
     }
@@ -849,6 +849,16 @@ function refreshChallenge(store: AppStore, challenge: Challenge) {
   else if (allResponded && challenge.participants.filter((item) => item.accepted).length <= 1) challenge.status = "completed";
   else if (allResponded && challenge.participants.filter((item) => item.accepted).length > 1 && today >= challenge.startsOn) challenge.status = "active";
   else challenge.status = "inviting";
+}
+
+export function refreshAllChallenges(store: AppStore): ID[] {
+  const changed: ID[] = [];
+  for (const challenge of store.challenges) {
+    const previous = JSON.stringify({ status: challenge.status, participants: challenge.participants });
+    refreshChallenge(store, challenge);
+    if (previous !== JSON.stringify({ status: challenge.status, participants: challenge.participants })) changed.push(challenge.id);
+  }
+  return changed;
 }
 
 function addMilestoneMessages(store: AppStore, userId: ID, milestone: string) {

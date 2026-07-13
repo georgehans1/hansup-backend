@@ -2,6 +2,7 @@ import { loadLocalEnv } from "./env.js";
 import { createServer } from "./server.js";
 import { productionConfig, missingProductionConfig } from "./config.js";
 import { createProductionContext } from "./postgres.js";
+import { refreshAllChallenges } from "./store.js";
 
 loadLocalEnv();
 
@@ -20,3 +21,11 @@ createServer(store, config, persist).listen(port, () => {
   console.log(`HansUp API listening on http://localhost:${port}`);
   console.log(`HansUp demo data: ${useDemoData ? "on" : "off"}`);
 });
+
+setInterval(async () => {
+  try {
+    for (const challengeId of refreshAllChallenges(store)) await persist({ kind: "challenge", challengeId });
+  } catch (error) {
+    console.error(JSON.stringify({ event: "challenge-finalization-failed", error: error instanceof Error ? error.message : String(error) }));
+  }
+}, 60_000).unref();
