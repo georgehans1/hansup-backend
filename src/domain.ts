@@ -81,6 +81,23 @@ export interface ActivitySummary {
   updatedAt: string;
 }
 
+export type WorkoutActivityType = "walking" | "running" | "strengthTraining";
+
+export interface WorkoutSummary {
+  id: ID;
+  userId: ID;
+  healthkitUUID: string;
+  activityType: WorkoutActivityType;
+  startedAt: string;
+  endedAt: string;
+  durationSeconds: number;
+  distanceMeters: number;
+  calories: number;
+  source: "healthkit";
+  trustLevel: "verified" | "review";
+  updatedAt: string;
+}
+
 export interface Goal {
   id: ID;
   userId: ID;
@@ -358,20 +375,47 @@ export function detectTrustLevel(summary: Omit<ActivitySummary, "id" | "source" 
   return summary.steps > 60000 || summary.runningDistanceMeters > 50000 ? "review" : "verified";
 }
 
-export function filterSummariesForPeriod(summaries: ActivitySummary[], period: LeaderboardPeriod, now = "2026-06-22"): ActivitySummary[] {
+export function filterSummariesForPeriod(
+  summaries: ActivitySummary[],
+  period: LeaderboardPeriod,
+  now = localDateForTimeZone("UTC")
+): ActivitySummary[] {
   if (period === "all") return summaries;
   const current = new Date(`${now}T12:00:00Z`);
-  const dayMs = 24 * 60 * 60 * 1000;
   const start =
     period === "today"
       ? new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), current.getUTCDate()))
       : period === "week"
-        ? new Date(current.getTime() - 6 * dayMs)
+        ? new Date(`${startOfWeek(now)}T12:00:00Z`)
         : new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), 1));
 
   const startKey = start.toISOString().slice(0, 10);
   const endKey = current.toISOString().slice(0, 10);
   return summaries.filter((summary) => summary.localDate >= startKey && summary.localDate <= endKey);
+}
+
+export function localDateForTimeZone(timeZone: string, date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value;
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+export function startOfWeek(localDate: string): string {
+  const date = new Date(`${localDate}T12:00:00Z`);
+  const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - daysSinceMonday);
+  return date.toISOString().slice(0, 10);
+}
+
+export function addLocalDays(localDate: string, days: number): string {
+  const date = new Date(`${localDate}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function valueForKind(summary: ActivitySummary, kind: ActivityKind): number {

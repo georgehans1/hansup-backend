@@ -20,11 +20,15 @@ import {
   User,
   UserBadge,
   UserSettings,
+  WorkoutSummary,
   calculateStreak,
+  addLocalDays,
   detectTrustLevel,
   earnedBadges,
   generateWeeklyRecap,
   leaderboardRows,
+  localDateForTimeZone,
+  startOfWeek,
   scoreChallenge
 } from "./domain.js";
 import { TokenPair, VerifiedIdentity, issueDemoTokens } from "./auth.js";
@@ -34,6 +38,7 @@ export interface AppStore {
   settings: UserSettings[];
   friendships: Friendship[];
   summaries: ActivitySummary[];
+  workouts: WorkoutSummary[];
   goals: Goal[];
   streaks: Streak[];
   challenges: Challenge[];
@@ -53,6 +58,7 @@ export function createEmptyStore(): AppStore {
     settings: [],
     friendships: [],
     summaries: [],
+    workouts: [],
     goals: [],
     streaks: [],
     challenges: [],
@@ -203,6 +209,7 @@ export function createDemoStore(): AppStore {
     })),
     friendships,
     summaries,
+    workouts: [],
     goals,
     streaks,
     challenges: [challenge, completed, pending],
@@ -287,15 +294,39 @@ export function publicProfile(store: AppStore, viewerId: ID, userId: ID) {
 export function profileActivity(store: AppStore, viewerId: ID, userId: ID) {
   const status = friendshipStatus(store, viewerId, userId);
   if (viewerId !== userId && status !== "accepted") {
-    return { profile: publicProfile(store, viewerId, userId), summaries: [], feed: [], stats: undefined, badges: [] };
+    return { profile: publicProfile(store, viewerId, userId), summaries: [], workouts: [], feed: [], stats: undefined, badges: [] };
   }
   return {
     profile: publicProfile(store, viewerId, userId),
     summaries: store.summaries.filter((summary) => summary.userId === userId),
+    workouts: store.workouts.filter((workout) => workout.userId === userId).sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
     feed: store.feed.filter((item) => item.userId === userId),
     stats: profileStats(store, userId),
     badges: badgesForUser(store, userId)
   };
+}
+
+export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
+  const allowed = new Set(["walking", "running", "strengthTraining"]);
+  const now = new Date().toISOString();
+  return input.map((workout) => {
+    if (!allowed.has(workout.activityType)) throw new Error("Unsupported workout activity type");
+    const existing = store.workouts.find((item) => item.userId === userId && item.healthkitUUID === workout.healthkitUUID);
+    const saved: WorkoutSummary = {
+      id: existing?.id ?? `workout_${userId}_${workout.healthkitUUID}`,
+      userId,
+      ...workout,
+      durationSeconds: Math.max(0, workout.durationSeconds),
+      distanceMeters: Math.max(0, workout.distanceMeters),
+      calories: Math.max(0, workout.calories),
+      source: "healthkit",
+      trustLevel: "verified",
+      updatedAt: now
+    };
+    if (existing) Object.assign(existing, saved);
+    else store.workouts.push(saved);
+    return saved;
+  });
 }
 
 export function sendFriendRequest(store: AppStore, requesterId: ID, addresseeId: ID): Friendship {
@@ -379,7 +410,8 @@ export function friendLeaderboard(store: AppStore, userId: ID, period: Leaderboa
       summaries: store.summaries,
       goals: store.goals,
       streaks: store.streaks,
-      period
+      period,
+      now: currentDateForUser(store, userId)
     })
   };
 }
@@ -454,7 +486,8 @@ export function conversationComparison(store: AppStore, userId: ID, conversation
       summaries: store.summaries,
       goals: store.goals,
       streaks: store.streaks,
-      period
+      period,
+      now: currentDateForUser(store, userId)
     })
   };
 }
@@ -511,12 +544,20 @@ export function addReaction(store: AppStore, feedItemId: ID, reactionInput: { us
   return saved;
 }
 
-export function weeklyRecapFor(store: AppStore, userId: ID, weekStartsOn = "2026-06-16") {
+export function weeklyRecapFor(store: AppStore, userId: ID, weekStartsOn?: string) {
+  const resolvedWeekStart = weekStartsOn ?? startOfWeek(currentDateForUser(store, userId));
+  const weekEndsOn = addLocalDays(resolvedWeekStart, 6);
+  const previousWeekStartsOn = addLocalDays(resolvedWeekStart, -7);
+  const previousWeekEndsOn = addLocalDays(resolvedWeekStart, -1);
   return generateWeeklyRecap({
     userId,
-    weekStartsOn,
-    summaries: store.summaries.filter((summary) => summary.userId === userId && summary.localDate >= weekStartsOn),
-    previousSummaries: store.summaries.filter((summary) => summary.userId === userId && summary.localDate < weekStartsOn),
+    weekStartsOn: resolvedWeekStart,
+    summaries: store.summaries.filter(
+      (summary) => summary.userId === userId && summary.localDate >= resolvedWeekStart && summary.localDate <= weekEndsOn
+    ),
+    previousSummaries: store.summaries.filter(
+      (summary) => summary.userId === userId && summary.localDate >= previousWeekStartsOn && summary.localDate <= previousWeekEndsOn
+    ),
     goalsHit: profileStats(store, userId).goalsHit,
     streakDays: store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0,
     leaderboardRank: friendLeaderboard(store, userId, "week").rows.find((row) => row.userId === userId)?.rank ?? 1,
@@ -673,6 +714,13 @@ function winnerText(challenge: Challenge, store: AppStore) {
 
 function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
+}
+
+function currentDateForUser(store: AppStore, userId: ID): string {
+  const timezone = [...store.summaries]
+    .filter((summary) => summary.userId === userId)
+    .sort((a, b) => b.localDate.localeCompare(a.localDate))[0]?.timezone ?? "UTC";
+  return localDateForTimeZone(timezone);
 }
 
 function slug(value: string) {
