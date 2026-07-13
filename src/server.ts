@@ -8,7 +8,14 @@ import {
   AppStore,
   authWithIdentity,
   blockUser,
+  blockedUsersFor,
+  unblockUser,
+  exportAccount,
+  deleteAccount,
+  addReport,
   conversationComparison,
+  challengesFor,
+  challengeFor,
   conversationsFor,
   createConversation,
   createDemoStore,
@@ -17,6 +24,9 @@ import {
   friendActivity,
   friendsFor,
   markConversationRead,
+  setConversationMuted,
+  leaveConversation,
+  addConversationMembers,
   messagesForConversation,
   profileActivity,
   publicProfile,
@@ -49,10 +59,16 @@ export function createServer(
   config: ProductionConfig = productionConfig(),
   onChange: (change: PersistenceChange) => Promise<void> = async () => {}
 ) {
+  const requestWindows = new Map<string, { startedAt: number; count: number }>();
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const userId = req.headers["x-user-id"]?.toString() || demoUserId;
+      const rateKey = req.headers["x-forwarded-for"]?.toString().split(",")[0] ?? userId;
+      const now = Date.now();
+      const window = requestWindows.get(rateKey);
+      if (!window || now - window.startedAt >= 60_000) requestWindows.set(rateKey, { startedAt: now, count: 1 });
+      else if (++window.count > 180) return json(res, 429, { error: "Too many requests. Try again shortly." });
 
       if (req.method === "GET" && url.pathname === "/health") {
         return json(res, 200, { ok: true });
@@ -172,6 +188,16 @@ export function createServer(
         return json(res, 200, result);
       }
 
+      if (req.method === "GET" && url.pathname === "/me/blocked-users") {
+        return json(res, 200, blockedUsersFor(store, userId));
+      }
+      const unblock = url.pathname.match(/^\/users\/([^/]+)\/unblock$/);
+      if (req.method === "POST" && unblock) {
+        const result = unblockUser(store, userId, unblock[1]);
+        await onChange({ kind: "unblock", blockerId: userId, blockedId: unblock[1] });
+        return json(res, 200, result);
+      }
+
       if (req.method === "POST" && url.pathname === "/activity/summaries") {
         const result = upsertSummary(store, await body(req));
         await onChange({ kind: "summary", summaryId: result.id, userId: result.userId });
@@ -182,6 +208,7 @@ export function createServer(
         const payload = await body<{ workouts: Parameters<typeof upsertWorkouts>[2] }>(req);
         const result = upsertWorkouts(store, userId, payload.workouts ?? []);
         await onChange({ kind: "workouts", workoutIds: result.map((item) => item.id) });
+        for (const challenge of challengesFor(store, userId)) await onChange({ kind: "challenge", challengeId: challenge.id });
         return json(res, 201, result);
       }
 
@@ -220,7 +247,30 @@ export function createServer(
 
       const conversationMessages = url.pathname.match(/^\/conversations\/([^/]+)\/messages$/);
       if (req.method === "GET" && conversationMessages) {
-        return json(res, 200, messagesForConversation(store, userId, conversationMessages[1]));
+        return json(res, 200, messagesForConversation(store, userId, conversationMessages[1], numberParam(url, "limit", 50), url.searchParams.get("before") ?? undefined));
+      }
+
+      const conversationMute = url.pathname.match(/^\/conversations\/([^/]+)\/mute$/);
+      if (req.method === "PATCH" && conversationMute) {
+        const payload = await body<{ muted: boolean }>(req);
+        const result = setConversationMuted(store, userId, conversationMute[1], payload.muted);
+        await onChange({ kind: "conversation-settings", conversationId: result.id, userId });
+        return json(res, 200, result);
+      }
+
+      const conversationLeave = url.pathname.match(/^\/conversations\/([^/]+)\/leave$/);
+      if (req.method === "POST" && conversationLeave) {
+        const result = leaveConversation(store, userId, conversationLeave[1]);
+        await onChange({ kind: "conversation-leave", conversationId: conversationLeave[1], userId });
+        return json(res, 200, result);
+      }
+
+      const conversationMembersRoute = url.pathname.match(/^\/conversations\/([^/]+)\/members$/);
+      if (req.method === "POST" && conversationMembersRoute) {
+        const payload = await body<{ memberIds: string[] }>(req);
+        const result = addConversationMembers(store, userId, conversationMembersRoute[1], payload.memberIds);
+        await onChange({ kind: "conversation", conversationId: conversationMembersRoute[1] });
+        return json(res, 200, result);
       }
 
       if (req.method === "POST" && conversationMessages) {
@@ -251,9 +301,23 @@ export function createServer(
       }
 
       if (req.method === "POST" && url.pathname === "/challenges") {
-        const result = addChallenge(store, await body(req));
+        const payload = await body<Omit<Parameters<typeof addChallenge>[1], "creatorId">>(req);
+        const result = addChallenge(store, { ...payload, creatorId: userId });
         await onChange({ kind: "challenge", challengeId: result.id });
         return json(res, 201, result);
+      }
+
+      if (req.method === "GET" && url.pathname === "/challenges") {
+        const result = challengesFor(store, userId);
+        for (const challenge of result) await onChange({ kind: "challenge", challengeId: challenge.id });
+        return json(res, 200, result);
+      }
+
+      const challengeDetail = url.pathname.match(/^\/challenges\/([^/]+)$/);
+      if (req.method === "GET" && challengeDetail) {
+        const result = challengeFor(store, userId, challengeDetail[1]);
+        await onChange({ kind: "challenge", challengeId: result.id });
+        return json(res, 200, result);
       }
 
       const challengeRespond = url.pathname.match(/^\/challenges\/([^/]+)\/respond$/);
@@ -313,12 +377,25 @@ export function createServer(
         }));
       }
 
+      if (req.method === "GET" && url.pathname === "/me/export") {
+        return json(res, 200, exportAccount(store, userId));
+      }
+
+      if (req.method === "POST" && url.pathname === "/reports") {
+        const result = addReport(store, userId, await body(req));
+        await onChange({ kind: "report", reportId: result.id });
+        return json(res, 201, result);
+      }
+
       if (req.method === "DELETE" && url.pathname === "/me") {
-        return json(res, 202, { ok: true, message: "Account deletion requested" });
+        const result = deleteAccount(store, userId);
+        await onChange({ kind: "account-delete", userId });
+        return json(res, 200, result);
       }
 
       return json(res, 404, { error: "Not found" });
     } catch (error) {
+      console.error(JSON.stringify({ level: "error", event: "request_failed", method: req.method, path: req.url, message: error instanceof Error ? error.message : "Bad request" }));
       return json(res, 400, { error: error instanceof Error ? error.message : "Bad request" });
     }
   });
@@ -336,8 +413,12 @@ function json(res: any, status: number, payload: unknown) {
 
 async function body<T>(req: any): Promise<T> {
   const chunks: unknown[] = [];
+  let size = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 5 * 1024 * 1024) throw new Error("Request body is too large");
+    chunks.push(buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as T;
 }

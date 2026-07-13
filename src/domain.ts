@@ -1,6 +1,6 @@
 export type ID = string;
 
-export type ActivityKind = "steps" | "distance" | "walking" | "running" | "activeMinutes" | "calories";
+export type ActivityKind = "steps" | "distance" | "walking" | "running" | "strengthTraining" | "activeMinutes" | "calories";
 export type GoalCadence = "daily" | "weekly";
 export type ChallengeStatus = "inviting" | "active" | "completed";
 export type ChallengeTemplate =
@@ -132,6 +132,8 @@ export interface Challenge {
   startsOn: string;
   endsOn: string;
   status: ChallengeStatus;
+  mode?: "target" | "competitive";
+  target?: number;
   participants: ChallengeParticipant[];
   rematchOfChallengeId?: ID;
   sharedConversationId?: ID;
@@ -434,5 +436,7 @@ function valueForKind(summary: ActivitySummary, kind: ActivityKind): number {
       return summary.activeMinutes;
     case "calories":
       return summary.calories;
+    case "strengthTraining":
+      return 0;
   }
 }
