@@ -1,4 +1,5 @@
 import { ProductionConfig } from "./config.js";
+import { info } from "./logger.js";
 
 export async function storeAvatar(config: ProductionConfig, userId: string, dataURL: string): Promise<string> {
   if (!config.supabaseUrl || !config.supabaseServiceRoleKey || !config.supabaseAvatarBucket) {
@@ -22,5 +23,6 @@ export async function storeAvatar(config: ProductionConfig, userId: string, data
     body: bytes
   });
   if (!response.ok) throw new Error(`Profile photo upload failed (${response.status})`);
+  info("avatar_uploaded", { userId, bucket: config.supabaseAvatarBucket, bytes: bytes.length });
   return `${config.supabaseUrl}/storage/v1/object/public/${encodeURIComponent(config.supabaseAvatarBucket)}/${path}?v=${Date.now()}`;
 }

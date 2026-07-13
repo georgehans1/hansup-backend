@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { info } from "./logger.js";
 import { AppStore, createDemoStore, createEmptyStore, defaultBadges } from "./store.js";
 import {
   ActivitySummary,
@@ -50,11 +51,13 @@ export class PostgresRepository {
   ) {}
 
   async migrate(schemaPath: string | URL = "src/schema.sql"): Promise<void> {
+    const startedAt = Date.now();
     const hasUsers = await this.query("select to_regclass('public.users') as name");
     if (!hasUsers.rows[0]?.name) {
       await this.query(readFileSync(schemaPath, "utf8"));
     }
     await this.ensureRuntimeTables();
+    info("database_migrations_ready", { durationMs: Date.now() - startedAt });
   }
 
   async loadStore(): Promise<AppStore | undefined> {

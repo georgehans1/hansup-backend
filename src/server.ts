@@ -52,16 +52,30 @@ import { sendApnsPush } from "./apns.js";
 import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
 import type { PersistenceChange } from "./postgres.js";
+import { error as logError, info, warn } from "./logger.js";
 
 const demoUserId = "u_ama";
 
 export function createServer(
   store: AppStore = createDemoStore(),
   config: ProductionConfig = productionConfig(),
-  onChange: (change: PersistenceChange) => Promise<void> = async () => {}
+  persistChange: (change: PersistenceChange) => Promise<void> = async () => {}
 ) {
   const requestWindows = new Map<string, { startedAt: number; count: number }>();
+  let requestSequence = 0;
   return http.createServer(async (req, res) => {
+    const startedAt = Date.now();
+    const requestId = `${startedAt.toString(36)}-${(++requestSequence).toString(36)}`;
+    const method = req.method ?? "UNKNOWN";
+    const requestPath = new URL(req.url ?? "/", "http://localhost").pathname;
+    res.setHeader("x-request-id", requestId);
+    res.on("finish", () => {
+      if (requestPath !== "/health") info("request_completed", { requestId, method, path: requestPath, status: res.statusCode, durationMs: Date.now() - startedAt });
+    });
+    const onChange = async (change: PersistenceChange) => {
+      await persistChange(change);
+      info("domain_change_persisted", { requestId, kind: change.kind });
+    };
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const userId = req.headers["x-user-id"]?.toString() || demoUserId;
@@ -69,7 +83,10 @@ export function createServer(
       const now = Date.now();
       const window = requestWindows.get(rateKey);
       if (!window || now - window.startedAt >= 60_000) requestWindows.set(rateKey, { startedAt: now, count: 1 });
-      else if (++window.count > 180) return json(res, 429, { error: "Too many requests. Try again shortly." });
+      else if (++window.count > 180) {
+        warn("rate_limit_exceeded", { requestId, path: requestPath });
+        return json(res, 429, { error: "Too many requests. Try again shortly." });
+      }
 
       if (req.method === "GET" && url.pathname === "/health") {
         return json(res, 200, { ok: true });
@@ -84,6 +101,7 @@ export function createServer(
         const identity = await verifyGoogleIdentity({ ...payload, config });
         const result = authWithIdentity(store, identity, config.jwtSecret ?? "demo-secret");
         await onChange({ kind: "auth", userId: result.user.id });
+        info("authentication_succeeded", { requestId, provider: "google", userId: result.user.id, newUsernameRequired: result.needsUsername });
         return json(res, 201, result);
       }
 
@@ -92,6 +110,7 @@ export function createServer(
         const identity = await exchangeGoogleAuthorizationCode({ ...payload, config });
         const result = authWithIdentity(store, identity, config.jwtSecret ?? "demo-secret");
         await onChange({ kind: "auth", userId: result.user.id });
+        info("authentication_succeeded", { requestId, provider: "google_code", userId: result.user.id, newUsernameRequired: result.needsUsername });
         return json(res, 201, result);
       }
 
@@ -398,7 +417,7 @@ export function createServer(
 
       return json(res, 404, { error: "Not found" });
     } catch (error) {
-      console.error(JSON.stringify({ level: "error", event: "request_failed", method: req.method, path: req.url, message: error instanceof Error ? error.message : "Bad request" }));
+      logError("request_failed", error, { requestId, method, path: requestPath, durationMs: Date.now() - startedAt });
       return json(res, 400, { error: error instanceof Error ? error.message : "Bad request" });
     }
   });

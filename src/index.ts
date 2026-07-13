@@ -3,6 +3,7 @@ import { createServer } from "./server.js";
 import { productionConfig, missingProductionConfig } from "./config.js";
 import { createProductionContext } from "./postgres.js";
 import { refreshAllChallenges } from "./store.js";
+import { error, info, warn } from "./logger.js";
 
 loadLocalEnv();
 
@@ -12,20 +13,21 @@ const missing = missingProductionConfig(config);
 const useDemoData = process.env.USE_DEMO_DATA === "true";
 
 if (process.env.NODE_ENV === "production" && missing.length > 0) {
-  console.warn(`HansUp production config missing: ${missing.join(", ")}`);
+  warn("production_config_missing", { keys: missing });
 }
 
 const { store, persist } = await createProductionContext(config.databaseUrl, useDemoData);
 
 createServer(store, config, persist).listen(port, () => {
-  console.log(`HansUp API listening on http://localhost:${port}`);
-  console.log(`HansUp demo data: ${useDemoData ? "on" : "off"}`);
+  info("server_started", { port, environment: process.env.NODE_ENV ?? "development", demoData: useDemoData });
 });
 
 setInterval(async () => {
   try {
-    for (const challengeId of refreshAllChallenges(store)) await persist({ kind: "challenge", challengeId });
-  } catch (error) {
-    console.error(JSON.stringify({ event: "challenge-finalization-failed", error: error instanceof Error ? error.message : String(error) }));
+    const changed = refreshAllChallenges(store);
+    for (const challengeId of changed) await persist({ kind: "challenge", challengeId });
+    if (changed.length > 0) info("challenges_finalized", { count: changed.length });
+  } catch (failure) {
+    error("challenge_finalization_failed", failure);
   }
 }, 60_000).unref();
