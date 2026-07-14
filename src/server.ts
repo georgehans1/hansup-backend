@@ -12,6 +12,7 @@ import {
   AppStore,
   authWithIdentity,
   blockUser,
+  badgeProgressForUser,
   blockedUsersFor,
   unblockUser,
   exportAccount,
@@ -46,6 +47,7 @@ import {
   reactToMessage,
   rematchChallenge,
   removeFriend,
+  refreshBadgesForUser,
   respondChallenge,
   respondFriendRequest,
   searchUsers,
@@ -441,9 +443,12 @@ export function createServer(
       }
 
       if (req.method === "GET" && url.pathname === "/badges") {
+        const newlyEarned = refreshBadgesForUser(store, userId);
+        if (newlyEarned.length > 0) await onChange({ kind: "badges", userId });
         return json(res, 200, {
           badges: store.badges,
-          userBadges: store.userBadges.filter((item) => item.userId === userId)
+          userBadges: store.userBadges.filter((item) => item.userId === userId),
+          progress: badgeProgressForUser(store, userId)
         });
       }
 

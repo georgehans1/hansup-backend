@@ -36,6 +36,7 @@ export type PersistenceChange =
   | { kind: "workouts"; workoutIds: string[] }
   | { kind: "goal"; goalId: string; userId: string }
   | { kind: "goal-delete"; goalId: string; userId: string }
+  | { kind: "badges"; userId: string }
   | { kind: "conversation"; conversationId: string }
   | { kind: "message"; messageId: string }
   | { kind: "conversation-read"; conversationId: string; userId: string }
@@ -254,6 +255,10 @@ export class PostgresRepository {
         for (const workoutId of change.workoutIds) {
           await this.insertWorkout(required(store.workouts.find((item) => item.id === workoutId), "Workout summary"));
         }
+        if (change.workoutIds.length > 0) {
+          const userId = store.workouts.find((item) => item.id === change.workoutIds[0])?.userId;
+          if (userId) await this.persistDerivedActivity(store, userId);
+        }
         return;
       case "goal":
         await this.insertGoal(required(store.goals.find((item) => item.id === change.goalId), "Goal"));
@@ -262,6 +267,11 @@ export class PostgresRepository {
       case "goal-delete":
         await this.query("delete from goals where id = $1 and user_id = $2", [change.goalId, change.userId]);
         await this.persistDerivedActivity(store, change.userId);
+        return;
+      case "badges":
+        for (const badge of store.userBadges.filter((item) => item.userId === change.userId)) {
+          await this.insertUserBadge(badge);
+        }
         return;
       case "conversation": {
         await this.insertConversation(required(store.conversations.find((item) => item.id === change.conversationId), "Conversation"));

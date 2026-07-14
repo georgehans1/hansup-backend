@@ -1,5 +1,6 @@
 import {
   ActivityComparison,
+  ActivityKind,
   AppNotification,
   ActivitySummary,
   Badge,
@@ -25,7 +26,6 @@ import {
   calculateStreak,
   addLocalDays,
   detectTrustLevel,
-  earnedBadges,
   generateWeeklyRecap,
   leaderboardRows,
   localDateForTimeZone,
@@ -414,7 +414,7 @@ export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<Wo
     else store.workouts.push(saved);
     return saved;
   });
-  for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) refreshChallenge(store, challenge);
+  refreshDerived(store, userId);
   return savedWorkouts;
 }
 
@@ -884,6 +884,25 @@ export function badgesForUser(store: AppStore, userId: ID) {
     .filter((item) => item.badge);
 }
 
+export function badgeProgressForUser(store: AppStore, userId: ID) {
+  const earnedById = new Map(store.userBadges.filter((item) => item.userId === userId).map((item) => [item.badgeId, item]));
+  return store.badges.map((badge) => {
+    const current = badgeMetric(store, userId, badge.ruleKind);
+    const earned = badge.ruleKind === "fastest5K" ? current > 0 && current <= badge.threshold : current >= badge.threshold;
+    return { badgeId: badge.id, current, target: badge.threshold, earned, earnedAt: earnedById.get(badge.id)?.earnedAt };
+  });
+}
+
+export function refreshBadgesForUser(store: AppStore, userId: ID) {
+  const existing = new Set(store.userBadges.filter((item) => item.userId === userId).map((item) => item.badgeId));
+  const now = new Date().toISOString();
+  const newlyEarned = badgeProgressForUser(store, userId).filter((item) => item.earned && !existing.has(item.badgeId)).map((item) => ({
+    id: `user_badge_${userId}_${item.badgeId}`, userId, badgeId: item.badgeId, earnedAt: now
+  }));
+  store.userBadges.push(...newlyEarned);
+  return newlyEarned;
+}
+
 export function profileStats(store: AppStore, userId: ID): ProfileStats {
   const lifetimeSteps = store.summaries.filter((item) => item.userId === userId).reduce((sum, item) => sum + item.steps, 0);
   const challengeWins = store.challenges.filter((challenge) => {
@@ -984,14 +1003,7 @@ function refreshDerived(store: AppStore, userId: ID) {
   current.bestDays = Math.max(current.bestDays, calculatedDays);
   current.updatedAt = now;
 
-  const newBadges = earnedBadges({
-    userId,
-    badges: store.badges,
-    stats: profileStats(store, userId),
-    streak: current,
-    existing: store.userBadges
-  });
-  store.userBadges.push(...newBadges);
+  refreshBadgesForUser(store, userId);
   for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) refreshChallenge(store, challenge);
 }
 
@@ -1185,11 +1197,138 @@ function slug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9_]/g, "");
 }
 
+function badgeMetric(store: AppStore, userId: ID, ruleKind: Badge["ruleKind"]): number {
+  const summaries = store.summaries.filter((item) => item.userId === userId);
+  const workouts = store.workouts.filter((item) => item.userId === userId);
+  const walking = workouts.filter((item) => item.activityType === "walking");
+  const running = workouts.filter((item) => item.activityType === "running");
+  const strength = workouts.filter((item) => item.activityType === "strengthTraining");
+  const challenges = store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId && participant.accepted));
+  const dailyStepGoal = store.goals.find((goal) => goal.userId === userId && goal.kind === "steps" && goal.cadence === "daily" && goal.isEnabled)?.target ?? 10_000;
+  const weekGroups = <T extends { date: string }>(rows: T[]) => {
+    const groups = new Map<string, T[]>();
+    for (const item of rows) groups.set(startOfWeek(item.date), [...(groups.get(startOfWeek(item.date)) ?? []), item]);
+    return Array.from(groups.values());
+  };
+  const activeDates = new Set([...summaries.filter((item) => item.steps > 0 || item.activeMinutes > 0).map((item) => item.localDate), ...workouts.map((item) => item.startedAt.slice(0, 10))]);
+  const workoutRows = workouts.map((item) => ({ ...item, date: item.startedAt.slice(0, 10) }));
+  const summaryWeeks = weekGroups(summaries.map((item) => ({ ...item, date: item.localDate })));
+  const workoutWeeks = weekGroups(workoutRows);
+
+  switch (ruleKind) {
+    case "streak": return store.streaks.find((item) => item.userId === userId)?.bestDays ?? 0;
+    case "challengeWins": return profileStats(store, userId).challengeWins;
+    case "lifetimeSteps": return summaries.reduce((sum, item) => sum + item.steps, 0);
+    case "goalHits": return summaries.filter((summary) => store.goals.some((goal) => goal.userId === userId && goal.isEnabled && goal.cadence === "daily" && valueForBadgeKind(summary, goal.kind) >= goal.target)).length;
+    case "maxDailySteps": return Math.max(0, ...summaries.map((item) => item.steps));
+    case "overGoalPercent": return Math.max(0, ...summaries.map((item) => item.steps / dailyStepGoal));
+    case "walkingWorkouts": return walking.length;
+    case "maxWalkDistance": return Math.max(0, ...walking.map((item) => item.distanceMeters));
+    case "walkingActiveDaysWeek": return Math.max(0, ...workoutWeeks.map((week) => new Set(week.filter((item) => item.activityType === "walking").map((item) => item.date)).size));
+    case "lifetimeWalkingDistance": return walking.reduce((sum, item) => sum + item.distanceMeters, 0);
+    case "runningWorkouts": return running.length;
+    case "maxRunDistance": return Math.max(0, ...running.map((item) => item.distanceMeters));
+    case "fastest5K": {
+      const values = running.filter((item) => item.distanceMeters >= 5_000 && item.durationSeconds > 0).map((item) => item.durationSeconds * 5_000 / item.distanceMeters);
+      return values.length > 0 ? Math.min(...values) : 0;
+    }
+    case "runningWorkoutsWeek": return Math.max(0, ...workoutWeeks.map((week) => week.filter((item) => item.activityType === "running").length));
+    case "lifetimeRunningDistance": return running.reduce((sum, item) => sum + item.distanceMeters, 0);
+    case "strengthWorkouts": return strength.length;
+    case "maxStrengthDuration": return Math.max(0, ...strength.map((item) => item.durationSeconds));
+    case "strengthWorkoutsWeek": return Math.max(0, ...workoutWeeks.map((week) => week.filter((item) => item.activityType === "strengthTraining").length));
+    case "activityTypesWeek": return Math.max(0, ...workoutWeeks.map((week) => new Set(week.map((item) => item.activityType)).size));
+    case "activeDaysWeek": return Math.max(0, ...weekGroups(Array.from(activeDates).map((date) => ({ date }))).map((week) => week.length));
+    case "earlyActivities": return workouts.filter((item) => new Date(item.startedAt).getHours() < 7).length;
+    case "nightActivities": return workouts.filter((item) => new Date(item.startedAt).getHours() >= 20).length;
+    case "weekendActivities": return workouts.filter((item) => [0, 6].includes(new Date(item.startedAt).getDay())).length;
+    case "challengesJoined": return challenges.length;
+    case "challengesCompleted": return challenges.filter((item) => item.status === "completed").length;
+    case "rematches": return challenges.filter((item) => item.rematchOfChallengeId).length;
+    case "groupChallengesCompleted": return challenges.filter((item) => item.status === "completed" && item.participants.length > 2).length;
+    case "improvedWeeks": {
+      const totals = summaryWeeks.map((week) => ({ week: startOfWeek(week[0]?.date ?? ""), steps: week.reduce((sum, item) => sum + item.steps, 0) })).sort((a, b) => a.week.localeCompare(b.week));
+      return totals.slice(1).filter((item, index) => item.steps > totals[index].steps).length;
+    }
+  }
+}
+
+function valueForBadgeKind(summary: ActivitySummary, kind: ActivityKind): number {
+  switch (kind) {
+    case "steps": return summary.steps;
+    case "distance": return summary.walkingDistanceMeters + summary.runningDistanceMeters;
+    case "walking": return summary.walkingDistanceMeters;
+    case "running": return summary.runningDistanceMeters;
+    case "strengthTraining": return summary.workoutCount;
+    case "activeMinutes": return summary.activeMinutes;
+    case "calories": return summary.calories;
+  }
+}
+
 export function defaultBadges(): Badge[] {
   return [
-    { id: "badge_streak_7", title: "7-Day Streak", emoji: "🔥", ruleKind: "streak", threshold: 7 },
-    { id: "badge_first_win", title: "First Place", emoji: "🏆", ruleKind: "challengeWins", threshold: 1 },
-    { id: "badge_steps_100k", title: "100K Steps", emoji: "👟", ruleKind: "lifetimeSteps", threshold: 100000 },
-    { id: "badge_goal_5", title: "Goal Getter", emoji: "🎯", ruleKind: "goalHits", threshold: 5 }
+    badge("steps_1k", "First Steps", "👟", "maxDailySteps", 1_000, "Steps", "Record 1,000 steps in one day."),
+    badge("goal_once", "Goal Getter", "🎯", "goalHits", 1, "Steps", "Reach a personal goal."),
+    badge("goal_7", "On Target", "✅", "goalHits", 7, "Steps", "Reach personal goals seven times."),
+    badge("overachiever", "Overachiever", "🚀", "overGoalPercent", 1.5, "Steps", "Reach 150% of your daily step goal."),
+    badge("steps_20k", "Big Day", "⚡", "maxDailySteps", 20_000, "Steps", "Record 20,000 steps in one day."),
+    badge("steps_30k", "Step Giant", "🦶", "maxDailySteps", 30_000, "Steps", "Record 30,000 steps in one day."),
+    badge("steps_100k", "100K Club", "💯", "lifetimeSteps", 100_000, "Steps", "Record 100,000 lifetime steps."),
+    badge("steps_1m", "Million Steps", "🌟", "lifetimeSteps", 1_000_000, "Steps", "Record one million lifetime steps."),
+    badge("steps_5m", "Five Million Strong", "💎", "lifetimeSteps", 5_000_000, "Steps", "Record five million lifetime steps."),
+
+    badge("streak_3", "Getting Started", "🔥", "streak", 3, "Streaks", "Maintain a three-day streak."),
+    badge("streak_7", "7-Day Fire", "🔥", "streak", 7, "Streaks", "Maintain a seven-day streak."),
+    badge("streak_14", "Fortnight Focus", "🗓️", "streak", 14, "Streaks", "Maintain a 14-day streak."),
+    badge("streak_30", "Monthly Momentum", "🌙", "streak", 30, "Streaks", "Maintain a 30-day streak."),
+    badge("streak_100", "Unstoppable", "⚡", "streak", 100, "Streaks", "Maintain a 100-day streak."),
+    badge("streak_365", "Year of Motion", "🏅", "streak", 365, "Streaks", "Maintain a 365-day streak."),
+
+    badge("walk_1", "First Walk", "🚶", "walkingWorkouts", 1, "Walking", "Sync your first walking workout."),
+    badge("walk_5k", "5K Walker", "🥾", "maxWalkDistance", 5_000, "Walking", "Complete a 5 km walk."),
+    badge("walk_10k", "Long Walk", "🌳", "maxWalkDistance", 10_000, "Walking", "Complete a 10 km walk."),
+    badge("walk_week", "Walking Week", "📅", "walkingActiveDaysWeek", 5, "Walking", "Walk on five days in one week."),
+    badge("walk_100k", "Century Walker", "🧭", "lifetimeWalkingDistance", 100_000, "Walking", "Accumulate 100 km of walking."),
+    badge("walk_500k", "Walking the Distance", "🌍", "lifetimeWalkingDistance", 500_000, "Walking", "Accumulate 500 km of walking."),
+
+    badge("run_1", "First Run", "🏃", "runningWorkouts", 1, "Running", "Sync your first running workout."),
+    badge("run_5k", "First 5K", "5️⃣", "maxRunDistance", 5_000, "Running", "Complete a 5 km run."),
+    badge("run_10k", "First 10K", "🔟", "maxRunDistance", 10_000, "Running", "Complete a 10 km run."),
+    badge("run_half", "Half Marathoner", "🏁", "maxRunDistance", 21_097.5, "Running", "Complete a half marathon."),
+    badge("run_5k_30", "Five Under Thirty", "⏱️", "fastest5K", 1_800, "Running", "Complete 5 km in under 30 minutes."),
+    badge("run_week_3", "Consistent Runner", "📈", "runningWorkoutsWeek", 3, "Running", "Run three times in one week."),
+    badge("run_100k", "100K Runner", "🛣️", "lifetimeRunningDistance", 100_000, "Running", "Accumulate 100 km of running."),
+    badge("run_500k", "Road Warrior", "🏎️", "lifetimeRunningDistance", 500_000, "Running", "Accumulate 500 km of running."),
+
+    badge("strength_1", "First Lift", "🏋️", "strengthWorkouts", 1, "Strength", "Complete your first strength workout."),
+    badge("strength_3", "Strong Start", "💪", "strengthWorkouts", 3, "Strength", "Complete three strength sessions."),
+    badge("strength_week", "Strength Week", "🗓️", "strengthWorkoutsWeek", 3, "Strength", "Complete three strength sessions in one week."),
+    badge("strength_30", "Half-Hour Power", "⚙️", "maxStrengthDuration", 1_800, "Strength", "Complete a 30-minute strength session."),
+    badge("strength_60", "Iron Hour", "🔩", "maxStrengthDuration", 3_600, "Strength", "Complete a 60-minute strength session."),
+    badge("strength_25", "Strength Habit", "🦾", "strengthWorkouts", 25, "Strength", "Complete 25 strength sessions."),
+    badge("strength_100", "Century Strong", "🏆", "strengthWorkouts", 100, "Strength", "Complete 100 strength sessions."),
+
+    badge("triple_threat", "Triple Threat", "🔺", "activityTypesWeek", 3, "Activity", "Walk, run, and strength-train in one week."),
+    badge("active_week", "Active Week", "⚡", "activeDaysWeek", 5, "Activity", "Record activity on five days in one week."),
+    badge("perfect_week", "Perfect Week", "✨", "activeDaysWeek", 7, "Activity", "Record activity every day of a week."),
+    badge("early_bird", "Early Bird", "🌅", "earlyActivities", 1, "Activity", "Complete an activity before 7 AM."),
+    badge("night_mover", "Night Mover", "🌙", "nightActivities", 1, "Activity", "Complete an activity after 8 PM."),
+    badge("weekend_warrior", "Weekend Warrior", "🎉", "weekendActivities", 3, "Activity", "Complete three weekend activities."),
+
+    badge("challenge_join", "Challenge Accepted", "🤝", "challengesJoined", 1, "Challenges", "Join your first challenge."),
+    badge("challenge_finish", "Finisher", "🏁", "challengesCompleted", 1, "Challenges", "Complete your first challenge."),
+    badge("first_win", "First Victory", "🏆", "challengeWins", 1, "Challenges", "Win your first challenge."),
+    badge("wins_3", "Hat Trick", "🎩", "challengeWins", 3, "Challenges", "Win three challenges."),
+    badge("wins_5", "Five-Time Champion", "👑", "challengeWins", 5, "Challenges", "Win five challenges."),
+    badge("challenge_25", "Challenge Veteran", "🎖️", "challengesCompleted", 25, "Challenges", "Complete 25 challenges."),
+    badge("rematch", "Rematch Ready", "🔁", "rematches", 1, "Challenges", "Join a challenge rematch."),
+    badge("squad", "Squad Goals", "👥", "groupChallengesCompleted", 1, "Challenges", "Complete a group challenge."),
+
+    badge("better_week", "Better Than Last Week", "📈", "improvedWeeks", 1, "Milestones", "Improve your weekly steps over the previous week."),
+    badge("goals_3", "Goal Collector", "🎯", "goalHits", 3, "Milestones", "Complete three personal goals.")
   ];
+}
+
+function badge(id: string, title: string, emoji: string, ruleKind: Badge["ruleKind"], threshold: number, category: string, description: string): Badge {
+  return { id: `badge_${id}`, title, emoji, ruleKind, threshold, category, description };
 }
