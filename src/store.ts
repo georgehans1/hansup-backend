@@ -516,6 +516,11 @@ export function friendsFor(store: AppStore, userId: ID): User[] {
   return store.users.filter((item) => ids.includes(item.id));
 }
 
+export function profileFriendsFor(store: AppStore, viewerId: ID, userId: ID) {
+  if (viewerId !== userId && friendshipStatus(store, viewerId, userId) !== "accepted") throw new Error("Friends are not visible");
+  return friendsFor(store, userId).map((user) => publicProfile(store, viewerId, user.id));
+}
+
 export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">, updateDerived = true): ActivitySummary {
   const previousStreak = store.streaks.find((item) => item.userId === summaryInput.userId)?.currentDays ?? 0;
   const existing = store.summaries.find(
@@ -915,7 +920,8 @@ export function profileStats(store: AppStore, userId: ID): ProfileStats {
     lifetimeSteps,
     challengeWins,
     bestStreak: store.streaks.find((item) => item.userId === userId)?.bestDays ?? 0,
-    goalsHit: store.goals.filter((goal) => goal.userId === userId).length + Math.floor(lifetimeSteps / 50000)
+    goalsHit: store.goals.filter((goal) => goal.userId === userId).length + Math.floor(lifetimeSteps / 50000),
+    friendCount: friendsFor(store, userId).length
   };
 }
 

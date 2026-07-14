@@ -43,6 +43,7 @@ import {
   personalBestsFor,
   userSummaries,
   profileActivity,
+  profileFriendsFor,
   publicProfile,
   reactToMessage,
   rematchChallenge,
@@ -186,6 +187,11 @@ export function createServer(
       const userActivity = url.pathname.match(/^\/users\/([^/]+)\/activity$/);
       if (req.method === "GET" && userActivity) {
         return json(res, 200, profileActivity(store, userId, userActivity[1], url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined));
+      }
+
+      const userFriends = url.pathname.match(/^\/users\/([^/]+)\/friends$/);
+      if (req.method === "GET" && userFriends) {
+        return json(res, 200, profileFriendsFor(store, userId, userFriends[1]));
       }
 
       if (req.method === "GET" && url.pathname === "/friends") {

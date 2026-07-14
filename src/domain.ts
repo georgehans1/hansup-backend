@@ -257,6 +257,7 @@ export interface ProfileStats {
   challengeWins: number;
   bestStreak: number;
   goalsHit: number;
+  friendCount: number;
 }
 
 export interface LeaderboardRow {
