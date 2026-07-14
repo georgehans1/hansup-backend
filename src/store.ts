@@ -549,9 +549,11 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
 
 export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>): ActivitySummary[] {
   if (inputs.length === 0) return [];
-  const userId = inputs[0].userId;
+  const uniqueInputs = Array.from(new Map(inputs.map((input) => [`${input.userId}:${input.localDate}`, input])).values());
+  const userId = uniqueInputs[0].userId;
+  if (uniqueInputs.some((input) => input.userId !== userId)) throw new Error("Activity summary batches must belong to one user");
   const previousStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
-  const saved = inputs.map((input) => upsertSummary(store, input, false));
+  const saved = uniqueInputs.map((input) => upsertSummary(store, input, false));
   refreshDerived(store, userId);
   const currentStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
   if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
