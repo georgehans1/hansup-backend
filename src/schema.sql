@@ -93,6 +93,15 @@ CREATE TABLE goals (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE goal_versions (
+  goal_id text NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  target double precision NOT NULL,
+  effective_date date NOT NULL,
+  PRIMARY KEY (goal_id, effective_date)
+);
+
 CREATE TABLE streaks (
   user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   current_days integer NOT NULL DEFAULT 0,

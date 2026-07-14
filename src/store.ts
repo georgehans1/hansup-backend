@@ -41,6 +41,7 @@ export interface AppStore {
   summaries: ActivitySummary[];
   workouts: WorkoutSummary[];
   goals: Goal[];
+  goalVersions: Array<{ goalId: ID; userId: ID; kind: ActivityKind; target: number; effectiveDate: string }>;
   streaks: Streak[];
   challenges: Challenge[];
   feed: FeedItem[];
@@ -63,6 +64,7 @@ export function createEmptyStore(): AppStore {
     summaries: [],
     workouts: [],
     goals: [],
+    goalVersions: [],
     streaks: [],
     challenges: [],
     feed: [],
@@ -216,6 +218,7 @@ export function createDemoStore(): AppStore {
     summaries,
     workouts: [],
     goals,
+    goalVersions: goals.map((goal) => ({ goalId: goal.id, userId: goal.userId, kind: goal.kind, target: goal.target, effectiveDate: goal.createdAt.slice(0, 10) })),
     streaks,
     challenges: [challenge, completed, pending],
     feed,
@@ -567,6 +570,7 @@ export function addGoal(store: AppStore, goal: Omit<Goal, "id" | "createdAt">): 
   }
   const saved: Goal = { ...goal, isEnabled: goal.isEnabled ?? true, id: `goal_${store.goals.length + 1}`, createdAt: new Date().toISOString() };
   store.goals.push(saved);
+  store.goalVersions.push({ goalId: saved.id, userId: saved.userId, kind: saved.kind, target: saved.target, effectiveDate: currentDateForUser(store, saved.userId) });
   refreshDerived(store, goal.userId);
   return saved;
 }
@@ -579,6 +583,14 @@ export function updateGoal(store: AppStore, userId: ID, goalId: ID, patch: Parti
   if (store.goals.some((item) => item.id !== goal.id && item.userId === userId && item.kind === next.kind && item.cadence === next.cadence)) {
     throw new Error("An active goal already exists for this metric and frequency");
   }
+  if (!store.goalVersions.some((item) => item.goalId === goal.id)) {
+    store.goalVersions.push({ goalId: goal.id, userId, kind: goal.kind, target: goal.target, effectiveDate: goal.createdAt.slice(0, 10) });
+  }
+  if (next.target !== goal.target || next.kind !== goal.kind) {
+    const effectiveDate = currentDateForUser(store, userId);
+    store.goalVersions = store.goalVersions.filter((item) => item.goalId !== goal.id || item.effectiveDate !== effectiveDate);
+    store.goalVersions.push({ goalId: goal.id, userId, kind: next.kind, target: next.target, effectiveDate });
+  }
   Object.assign(goal, next);
   refreshDerived(store, userId);
   return goal;
@@ -588,6 +600,7 @@ export function deleteGoal(store: AppStore, userId: ID, goalId: ID) {
   const before = store.goals.length;
   store.goals = store.goals.filter((item) => !(item.id === goalId && item.userId === userId));
   if (store.goals.length === before) throw new Error("Goal not found");
+  store.goalVersions = store.goalVersions.filter((item) => item.goalId !== goalId);
   refreshDerived(store, userId);
   return { ok: true };
 }
@@ -977,11 +990,11 @@ export function lifetimePersonalBests(store: AppStore, userId: ID) {
   const fastest = (meters: number) => runs.filter((item) => item.distanceMeters >= meters).map((item) => ({ workout: item, elapsedSeconds: Math.round(item.durationSeconds * meters / item.distanceMeters), paceSecondsPerKm: Math.round(item.durationSeconds / (item.distanceMeters / 1000)) })).sort((a, b) => a.elapsedSeconds - b.elapsedSeconds).slice(0, 5);
   return {
     fastest1K: fastest(1000), fastest5K: fastest(5000), fastest10K: fastest(10000), fastestHalfMarathon: fastest(21097.5),
-    highestStepDays: [...summaries].sort((a, b) => b.steps - a.steps).slice(0, 5),
+    highestStepDays: summaries.filter((item) => item.steps > 0).sort((a, b) => b.steps - a.steps).slice(0, 5),
     longestWalks: workouts.filter((item) => item.activityType === "walking").sort((a, b) => b.distanceMeters - a.distanceMeters).slice(0, 5),
     longestActivities: [...workouts].sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 5),
     longestStrengthSessions: workouts.filter((item) => item.activityType === "strengthTraining").sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 5),
-    highestActiveMinuteDays: [...summaries].sort((a, b) => b.activeMinutes - a.activeMinutes).slice(0, 5)
+    highestActiveMinuteDays: summaries.filter((item) => item.activeMinutes > 0).sort((a, b) => b.activeMinutes - a.activeMinutes).slice(0, 5)
   };
 }
 
@@ -1000,7 +1013,9 @@ function refreshDerived(store: AppStore, userId: ID) {
   const userSummaries = store.summaries.filter((summary) => summary.userId === userId);
   const streakGoals = goalsForStreak(store, userId);
   const currentLocalDate = currentDateForUser(store, userId);
-  const calculatedDays = Math.max(0, ...streakGoals.map((goal) => calculateStreak(goal, userSummaries, currentLocalDate)));
+  const streakValues = streakGoals.map((goal) => versionedStreak(store, goal, userSummaries, currentLocalDate));
+  const calculatedDays = Math.max(0, ...streakValues.map((value) => value.current));
+  const calculatedBest = Math.max(0, ...streakValues.map((value) => value.best));
   const now = new Date().toISOString();
   let current = store.streaks.find((item) => item.userId === userId);
   if (!current) {
@@ -1008,11 +1023,38 @@ function refreshDerived(store: AppStore, userId: ID) {
     store.streaks.push(current);
   }
   current.currentDays = calculatedDays;
-  current.bestDays = Math.max(current.bestDays, calculatedDays);
+  current.bestDays = Math.max(calculatedBest, calculatedDays);
   current.updatedAt = now;
 
   refreshBadgesForUser(store, userId);
   for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) refreshChallenge(store, challenge);
+}
+
+export function refreshDerivedForUser(store: AppStore, userId: ID) {
+  refreshDerived(store, userId);
+}
+
+function versionedStreak(store: AppStore, goal: Goal, summaries: ActivitySummary[], currentLocalDate: string) {
+  const versions = store.goalVersions.filter((item) => item.goalId === goal.id).sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
+  const targetOn = (date: string) => [...versions].reverse().find((item) => item.effectiveDate <= date) ?? { kind: goal.kind, target: goal.target };
+  const byDate = new Map(summaries.map((summary) => [summary.localDate, summary]));
+  const achieved = (date: string) => {
+    const summary = byDate.get(date); if (!summary) return false;
+    const version = targetOn(date);
+    return valueForBadgeKind(summary, version.kind) >= version.target;
+  };
+  let date = currentLocalDate;
+  if (!achieved(date)) date = addLocalDays(date, -1);
+  let current = 0;
+  while (achieved(date)) { current += 1; date = addLocalDays(date, -1); }
+
+  let best = 0; let run = 0; let previous: string | undefined;
+  for (const summary of [...summaries].sort((a, b) => a.localDate.localeCompare(b.localDate))) {
+    if (previous && summary.localDate !== addLocalDays(previous, 1)) run = 0;
+    run = achieved(summary.localDate) ? run + 1 : 0;
+    best = Math.max(best, run); previous = summary.localDate;
+  }
+  return { current, best };
 }
 
 function refreshChallenge(store: AppStore, challenge: Challenge) {
