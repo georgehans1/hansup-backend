@@ -16,7 +16,9 @@ import {
   badgeProgressForUser,
   createConversation,
   createDemoStore,
+  createEmptyStore,
   friendLeaderboard,
+  lifetimePersonalBests,
   profileActivity,
   profileFriendsFor,
   profileStats,
@@ -29,7 +31,8 @@ import {
   sendFriendRequest,
   shareChallenge,
   upsertSummaries,
-  upsertSummary
+  upsertSummary,
+  updateGoal
 } from "../src/store.js";
 
 const summaries: ActivitySummary[] = [
@@ -133,6 +136,22 @@ test("coalesces duplicate dates in a summary batch", () => {
   assert.equal(store.summaries.filter((item) => item.userId === "u_ama" && item.localDate === payload.localDate).length, 1);
 });
 
+test("goal edits do not retroactively rewrite streak history", () => {
+  const store = createEmptyStore();
+  const goal: Goal = { id: "goal_steps", userId: "u_1", kind: "steps", cadence: "daily", target: 10_000, isEnabled: true, createdAt: "2026-07-01T00:00:00Z" };
+  store.goals.push(goal);
+  store.goalVersions.push({ goalId: goal.id, userId: goal.userId, kind: goal.kind, target: goal.target, effectiveDate: "2026-07-01" });
+  const values = [5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 0, 11_000, 11_000, 11_000, 11_000, 11_000, 11_000];
+  upsertSummaries(store, values.map((steps, index) => {
+    const value = makeSummary(`2026-07-${String(index + 1).padStart(2, "0")}`, steps, 0, 0, 0, 0);
+    const { id: _id, source: _source, trustLevel: _trust, updatedAt: _updated, ...payload } = value;
+    return payload;
+  }));
+  assert.equal(store.streaks[0].bestDays, 6);
+  updateGoal(store, "u_1", goal.id, { target: 1_000 });
+  assert.equal(store.streaks[0].bestDays, 6);
+});
+
 test("refreshes streaks from summaries without inflating on repeated sync", () => {
   const store = createDemoStore();
 
@@ -231,6 +250,21 @@ test("evaluates the expanded badge catalogue and awards badges idempotently", ()
   const awardedCount = store.userBadges.filter((badge) => badge.userId === "u_ama").length;
   refreshBadgesForUser(store, "u_ama");
   assert.equal(store.userBadges.filter((badge) => badge.userId === "u_ama").length, awardedCount);
+});
+
+test("personal bests exclude zero-valued days instead of padding the top five", () => {
+  const store = createDemoStore();
+  store.summaries.push(
+    ...[4_000, 3_000, 2_000, 1_000, 0].map((steps, index) => ({
+      ...makeSummary(`2026-05-0${index + 1}`, steps, 0, 0, 0, 0),
+      id: `sparse_${index}`,
+      userId: "u_sparse"
+    }))
+  );
+  const bests = lifetimePersonalBests(store, "u_sparse");
+  assert.equal(bests.highestStepDays.length, 4);
+  assert.ok(bests.highestStepDays.every((item) => item.steps > 0));
+  assert.equal(bests.highestActiveMinuteDays.length, 0);
 });
 
 function makeSummary(

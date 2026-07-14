@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { info } from "./logger.js";
-import { AppStore, createDemoStore, createEmptyStore, defaultBadges } from "./store.js";
+import { AppStore, createDemoStore, createEmptyStore, defaultBadges, refreshDerivedForUser } from "./store.js";
 import {
   ActivitySummary,
   AppNotification,
@@ -37,6 +37,7 @@ export type PersistenceChange =
   | { kind: "goal"; goalId: string; userId: string }
   | { kind: "goal-delete"; goalId: string; userId: string }
   | { kind: "badges"; userId: string }
+  | { kind: "derived"; userId: string }
   | { kind: "conversation"; conversationId: string }
   | { kind: "message"; messageId: string }
   | { kind: "conversation-read"; conversationId: string; userId: string }
@@ -74,6 +75,7 @@ export class PostgresRepository {
     const summaries = (await this.query("select * from activity_summaries order by local_date")).rows.map(mapSummary);
     const workouts = (await this.query("select * from workout_summaries order by started_at")).rows.map(mapWorkout);
     const goals = (await this.query("select * from goals")).rows.map(mapGoal);
+    const goalVersions = (await this.query("select * from goal_versions order by effective_date")).rows.map((row) => ({ goalId: row.goal_id, userId: row.user_id, kind: row.kind, target: row.target, effectiveDate: dateString(row.effective_date).slice(0, 10) }));
     const streaks = (await this.query("select * from streaks")).rows.map(mapStreak);
     const challenges = (await this.query("select * from challenges")).rows.map(mapChallenge);
     const participants = (await this.query("select * from challenge_participants")).rows;
@@ -123,6 +125,7 @@ export class PostgresRepository {
       summaries,
       workouts,
       goals,
+      goalVersions,
       streaks,
       challenges,
       feed,
@@ -147,6 +150,7 @@ export class PostgresRepository {
     for (const summary of store.summaries) await this.insertSummary(summary);
     for (const workout of store.workouts) await this.insertWorkout(workout);
     for (const goal of store.goals) await this.insertGoal(goal);
+    for (const version of store.goalVersions) await this.insertGoalVersion(version);
     for (const streak of store.streaks) await this.insertStreak(streak);
     for (const badge of store.badges) await this.insertBadge(badge);
     for (const userBadge of store.userBadges) await this.insertUserBadge(userBadge);
@@ -262,6 +266,7 @@ export class PostgresRepository {
         return;
       case "goal":
         await this.insertGoal(required(store.goals.find((item) => item.id === change.goalId), "Goal"));
+        for (const version of store.goalVersions.filter((item) => item.goalId === change.goalId)) await this.insertGoalVersion(version);
         await this.persistDerivedActivity(store, change.userId);
         return;
       case "goal-delete":
@@ -272,6 +277,9 @@ export class PostgresRepository {
         for (const badge of store.userBadges.filter((item) => item.userId === change.userId)) {
           await this.insertUserBadge(badge);
         }
+        return;
+      case "derived":
+        await this.persistDerivedActivity(store, change.userId);
         return;
       case "conversation": {
         await this.insertConversation(required(store.conversations.find((item) => item.id === change.conversationId), "Conversation"));
@@ -410,6 +418,13 @@ export class PostgresRepository {
           "create index if not exists notifications_user_created_idx on notifications(user_id, created_at desc)",
           "create index if not exists notifications_user_unread_idx on notifications(user_id, read_at) where archived_at is null"
         ]
+      },
+      {
+        id: "009_goal_versions",
+        statements: [
+          "create table if not exists goal_versions (goal_id text not null references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, kind text not null, target double precision not null, effective_date date not null, primary key(goal_id, effective_date))",
+          "insert into goal_versions (goal_id, user_id, kind, target, effective_date) select id, user_id, kind, target, created_at::date from goals on conflict do nothing"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -436,6 +451,7 @@ export class PostgresRepository {
        delete from user_badges;
        delete from badges;
        delete from streaks;
+       delete from goal_versions;
        delete from goals;
        delete from workout_summaries;
        delete from activity_summaries;
@@ -579,6 +595,13 @@ export class PostgresRepository {
     );
   }
 
+  private insertGoalVersion(version: AppStore["goalVersions"][number]) {
+    return this.query(
+      "insert into goal_versions (goal_id, user_id, kind, target, effective_date) values ($1, $2, $3, $4, $5) on conflict (goal_id, effective_date) do update set kind = excluded.kind, target = excluded.target",
+      [version.goalId, version.userId, version.kind, version.target, version.effectiveDate]
+    );
+  }
+
   private insertStreak(streak: Streak) {
     return this.query(
       "insert into streaks (user_id, current_days, best_days, updated_at) values ($1, $2, $3, $4) on conflict (user_id) do update set current_days = excluded.current_days, best_days = excluded.best_days, updated_at = excluded.updated_at",
@@ -705,6 +728,10 @@ export async function createProductionContext(databaseUrl?: string, useDemoData 
   store.badges = badges;
   if (loadedStore) {
     await repository.seedBadges(badges);
+    for (const user of store.users) {
+      refreshDerivedForUser(store, user.id);
+      await repository.persistChange(store, { kind: "derived", userId: user.id });
+    }
   } else {
     await repository.saveStore(store);
   }
