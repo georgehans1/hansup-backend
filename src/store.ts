@@ -972,7 +972,8 @@ export function userSummaries(store: AppStore, viewerId: ID, ids: ID[]) {
 function refreshDerived(store: AppStore, userId: ID) {
   const userSummaries = store.summaries.filter((summary) => summary.userId === userId);
   const streakGoals = goalsForStreak(store, userId);
-  const calculatedDays = Math.max(0, ...streakGoals.map((goal) => calculateStreak(goal, userSummaries)));
+  const currentLocalDate = currentDateForUser(store, userId);
+  const calculatedDays = Math.max(0, ...streakGoals.map((goal) => calculateStreak(goal, userSummaries, currentLocalDate)));
   const now = new Date().toISOString();
   let current = store.streaks.find((item) => item.userId === userId);
   if (!current) {

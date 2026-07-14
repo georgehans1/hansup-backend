@@ -53,6 +53,8 @@ test("calculates goal progress and current streak", () => {
 
   assert.equal(calculateGoalProgress(goal, [summaries[1]]), 1);
   assert.equal(calculateStreak(goal, summaries), 1);
+  assert.equal(calculateStreak(goal, summaries, "2026-06-22"), 1);
+  assert.equal(calculateStreak(goal, summaries, "2026-06-23"), 0);
 });
 
 test("ranks users with deterministic tie ordering", () => {

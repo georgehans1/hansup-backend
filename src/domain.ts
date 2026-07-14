@@ -271,19 +271,36 @@ export function countGoalsHit(goals: Goal[], summaries: ActivitySummary[]): numb
   return goals.filter((goal) => calculateGoalProgress(goal, summaries) >= 1).length;
 }
 
-export function calculateStreak(goal: Goal, summaries: ActivitySummary[]): number {
-  const ordered = [...summaries].sort((a, b) => b.localDate.localeCompare(a.localDate));
+export function calculateStreak(goal: Goal, summaries: ActivitySummary[], currentLocalDate?: string): number {
+  const byDate = new Map(summaries.map((summary) => [summary.localDate, summary]));
+  let expectedDate = currentLocalDate ?? [...summaries].sort((a, b) => b.localDate.localeCompare(a.localDate))[0]?.localDate;
   let streak = 0;
 
-  for (const summary of ordered) {
+  if (!expectedDate) return streak;
+
+  const current = byDate.get(expectedDate);
+  if (currentLocalDate && (!current || valueForKind(current, goal.kind) < goal.target)) {
+    expectedDate = offsetLocalDate(expectedDate, -1);
+  }
+
+  while (expectedDate) {
+    const summary = byDate.get(expectedDate);
+    if (!summary) break;
     if (valueForKind(summary, goal.kind) >= goal.target) {
       streak += 1;
+      expectedDate = offsetLocalDate(expectedDate, -1);
       continue;
     }
     break;
   }
 
   return streak;
+}
+
+function offsetLocalDate(localDate: string, days: number): string {
+  const date = new Date(`${localDate}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 export function scoreChallenge(kind: ActivityKind, summaries: ActivitySummary[]): number {
