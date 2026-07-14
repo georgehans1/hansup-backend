@@ -516,6 +516,11 @@ export function friendsFor(store: AppStore, userId: ID): User[] {
   return store.users.filter((item) => ids.includes(item.id));
 }
 
+export function profileFriendsFor(store: AppStore, viewerId: ID, userId: ID) {
+  if (viewerId !== userId && friendshipStatus(store, viewerId, userId) !== "accepted") throw new Error("Friends are not visible");
+  return friendsFor(store, userId).map((user) => publicProfile(store, viewerId, user.id));
+}
+
 export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">, updateDerived = true): ActivitySummary {
   const previousStreak = store.streaks.find((item) => item.userId === summaryInput.userId)?.currentDays ?? 0;
   const existing = store.summaries.find(
@@ -544,9 +549,11 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
 
 export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>): ActivitySummary[] {
   if (inputs.length === 0) return [];
-  const userId = inputs[0].userId;
+  const uniqueInputs = Array.from(new Map(inputs.map((input) => [`${input.userId}:${input.localDate}`, input])).values());
+  const userId = uniqueInputs[0].userId;
+  if (uniqueInputs.some((input) => input.userId !== userId)) throw new Error("Activity summary batches must belong to one user");
   const previousStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
-  const saved = inputs.map((input) => upsertSummary(store, input, false));
+  const saved = uniqueInputs.map((input) => upsertSummary(store, input, false));
   refreshDerived(store, userId);
   const currentStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
   if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
@@ -915,7 +922,8 @@ export function profileStats(store: AppStore, userId: ID): ProfileStats {
     lifetimeSteps,
     challengeWins,
     bestStreak: store.streaks.find((item) => item.userId === userId)?.bestDays ?? 0,
-    goalsHit: store.goals.filter((goal) => goal.userId === userId).length + Math.floor(lifetimeSteps / 50000)
+    goalsHit: store.goals.filter((goal) => goal.userId === userId).length + Math.floor(lifetimeSteps / 50000),
+    friendCount: friendsFor(store, userId).length
   };
 }
 

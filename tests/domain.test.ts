@@ -18,6 +18,8 @@ import {
   createDemoStore,
   friendLeaderboard,
   profileActivity,
+  profileFriendsFor,
+  profileStats,
   refreshBadgesForUser,
   reactToMessage,
   rematchChallenge,
@@ -26,6 +28,7 @@ import {
   searchUsers,
   sendFriendRequest,
   shareChallenge,
+  upsertSummaries,
   upsertSummary
 } from "../src/store.js";
 
@@ -120,6 +123,16 @@ test("upserts activity summaries idempotently and flags unusual spikes", () => {
   assert.equal(detectTrustLevel(saved), "review");
 });
 
+test("coalesces duplicate dates in a summary batch", () => {
+  const store = createDemoStore();
+  const input = { ...makeSummary("2026-06-24", 5_000, 2_000, 0, 20, 200), userId: "u_ama" };
+  const { id: _id, source: _source, trustLevel: _trust, updatedAt: _updated, ...payload } = input;
+  const saved = upsertSummaries(store, [payload, { ...payload, steps: 6_000 }]);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].steps, 6_000);
+  assert.equal(store.summaries.filter((item) => item.userId === "u_ama" && item.localDate === payload.localDate).length, 1);
+});
+
 test("refreshes streaks from summaries without inflating on repeated sync", () => {
   const store = createDemoStore();
 
@@ -170,6 +183,14 @@ test("friend requests can be sent and accepted", () => {
   assert.equal(request.status, "pending");
   const accepted = respondFriendRequest(store, request.id, "u_sam", true);
   assert.equal(accepted.status, "accepted");
+});
+
+test("profile friend counts and lists reflect accepted friendships", () => {
+  const store = createDemoStore();
+  const friends = profileFriendsFor(store, "u_ama", "u_kofi");
+  assert.equal(profileStats(store, "u_kofi").friendCount, friends.length);
+  assert.ok(friends.some((friend) => friend.id === "u_ama"));
+  assert.throws(() => profileFriendsFor(store, "u_ama", "u_sam"), /not visible/i);
 });
 
 test("friend and conversation leaderboards support month and all-time periods", () => {

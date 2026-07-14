@@ -257,6 +257,7 @@ export interface ProfileStats {
   challengeWins: number;
   bestStreak: number;
   goalsHit: number;
+  friendCount: number;
 }
 
 export interface LeaderboardRow {
@@ -393,7 +394,9 @@ export function generateWeeklyRecap(input: {
     leaderboardRank: input.leaderboardRank,
     challengeWins: input.challengeWins,
     trendPercent: previousSteps === 0 ? 100 : Math.round(((totalSteps - previousSteps) / previousSteps) * 100),
-    dayBars: input.summaries.map((summary) => ({ localDate: summary.localDate, steps: summary.steps }))
+    dayBars: Array.from(new Map(input.summaries.map((summary) => [summary.localDate, summary])).values())
+      .sort((a, b) => a.localDate.localeCompare(b.localDate))
+      .map((summary) => ({ localDate: summary.localDate, steps: summary.steps }))
   };
 }
 
