@@ -13,10 +13,12 @@ import {
 } from "../src/domain.js";
 import {
   conversationComparison,
+  badgeProgressForUser,
   createConversation,
   createDemoStore,
   friendLeaderboard,
   profileActivity,
+  refreshBadgesForUser,
   reactToMessage,
   rematchChallenge,
   respondChallenge,
@@ -195,6 +197,19 @@ test("challenge invitations, rematches, and sharing are functional", () => {
 
   const shared = shareChallenge(store, "u_ama", "c_weekend", "conv_squad");
   assert.equal(shared.sharedConversationId, "conv_squad");
+});
+
+test("evaluates the expanded badge catalogue and awards badges idempotently", () => {
+  const store = createDemoStore();
+  const progress = badgeProgressForUser(store, "u_ama");
+  assert.ok(store.badges.length >= 45);
+  assert.equal(progress.length, store.badges.length);
+  assert.ok(new Set(store.badges.map((badge) => badge.category)).size >= 8);
+
+  refreshBadgesForUser(store, "u_ama");
+  const awardedCount = store.userBadges.filter((badge) => badge.userId === "u_ama").length;
+  refreshBadgesForUser(store, "u_ama");
+  assert.equal(store.userBadges.filter((badge) => badge.userId === "u_ama").length, awardedCount);
 });
 
 function makeSummary(

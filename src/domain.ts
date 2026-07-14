@@ -16,7 +16,13 @@ export type FeedItemType = "activity" | "goal" | "streak" | "challenge" | "recap
 export type ConversationKind = "direct" | "group";
 export type MessageKind = "user" | "system";
 export type LeaderboardPeriod = "today" | "week" | "month" | "all";
-export type BadgeRuleKind = "streak" | "challengeWins" | "lifetimeSteps" | "goalHits" | "reactionGiven";
+export type BadgeRuleKind =
+  | "streak" | "challengeWins" | "lifetimeSteps" | "goalHits" | "maxDailySteps" | "overGoalPercent"
+  | "walkingWorkouts" | "maxWalkDistance" | "walkingActiveDaysWeek" | "lifetimeWalkingDistance"
+  | "runningWorkouts" | "maxRunDistance" | "fastest5K" | "runningWorkoutsWeek" | "lifetimeRunningDistance"
+  | "strengthWorkouts" | "maxStrengthDuration" | "strengthWorkoutsWeek" | "activityTypesWeek" | "activeDaysWeek"
+  | "earlyActivities" | "nightActivities" | "weekendActivities" | "challengesJoined" | "challengesCompleted"
+  | "rematches" | "groupChallengesCompleted" | "improvedWeeks";
 export type NotificationType = "friendRequest" | "friendAccepted" | "message" | "groupAdded" | "challengeInvite" | "challengeUpdate" | "reaction" | "goal" | "streak" | "rank" | "recap" | "personalBest";
 
 export interface User {
@@ -210,6 +216,16 @@ export interface Badge {
   emoji: string;
   ruleKind: BadgeRuleKind;
   threshold: number;
+  category?: string;
+  description?: string;
+}
+
+export interface BadgeProgress {
+  badgeId: ID;
+  current: number;
+  target: number;
+  earned: boolean;
+  earnedAt?: string;
 }
 
 export interface UserBadge {
