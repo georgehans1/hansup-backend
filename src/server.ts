@@ -157,7 +157,9 @@ export function createServer(
       }
 
       if (req.method === "GET" && url.pathname === "/me") {
-        return json(res, 200, currentUser(store, userId));
+        const result = currentUser(store, userId);
+        await onChange({ kind: "derived", userId });
+        return json(res, 200, result);
       }
 
       if (req.method === "PATCH" && url.pathname === "/me") {

@@ -277,6 +277,7 @@ export function authWithIdentity(store: AppStore, identity: VerifiedIdentity, to
 
 export function currentUser(store: AppStore, userId = "u_ama") {
   const user = requireUser(store, userId);
+  refreshDerived(store, userId);
   return {
     user,
     settings: store.settings.find((item) => item.userId === userId),
@@ -993,14 +994,14 @@ export function lifetimePersonalBests(store: AppStore, userId: ID) {
   const summaries = store.summaries.filter((item) => item.userId === userId);
   const workouts = store.workouts.filter((item) => item.userId === userId);
   const runs = workouts.filter((item) => item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
-  const fastest = (meters: number) => runs.filter((item) => item.distanceMeters >= meters).map((item) => ({ workout: item, elapsedSeconds: Math.round(item.durationSeconds * meters / item.distanceMeters), paceSecondsPerKm: Math.round(item.durationSeconds / (item.distanceMeters / 1000)) })).sort((a, b) => a.elapsedSeconds - b.elapsedSeconds).slice(0, 5);
+  const fastest = (meters: number) => runs.filter((item) => item.distanceMeters >= meters).map((item) => ({ workout: item, elapsedSeconds: Math.round(item.durationSeconds * meters / item.distanceMeters), paceSecondsPerKm: Math.round(item.durationSeconds / (item.distanceMeters / 1000)) })).sort((a, b) => a.elapsedSeconds - b.elapsedSeconds).slice(0, 20);
   return {
     fastest1K: fastest(1000), fastest5K: fastest(5000), fastest10K: fastest(10000), fastestHalfMarathon: fastest(21097.5),
-    highestStepDays: summaries.filter((item) => item.steps > 0).sort((a, b) => b.steps - a.steps).slice(0, 5),
-    longestWalks: workouts.filter((item) => item.activityType === "walking").sort((a, b) => b.distanceMeters - a.distanceMeters).slice(0, 5),
-    longestActivities: [...workouts].sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 5),
-    longestStrengthSessions: workouts.filter((item) => item.activityType === "strengthTraining").sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 5),
-    highestActiveMinuteDays: summaries.filter((item) => item.activeMinutes > 0).sort((a, b) => b.activeMinutes - a.activeMinutes).slice(0, 5)
+    highestStepDays: summaries.filter((item) => item.steps > 0).sort((a, b) => b.steps - a.steps).slice(0, 20),
+    longestWalks: workouts.filter((item) => item.activityType === "walking").sort((a, b) => b.distanceMeters - a.distanceMeters).slice(0, 20),
+    longestActivities: [...workouts].sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 20),
+    longestStrengthSessions: workouts.filter((item) => item.activityType === "strengthTraining").sort((a, b) => b.durationSeconds - a.durationSeconds).slice(0, 20),
+    highestActiveMinuteDays: summaries.filter((item) => item.activeMinutes > 0).sort((a, b) => b.activeMinutes - a.activeMinutes).slice(0, 20)
   };
 }
 
