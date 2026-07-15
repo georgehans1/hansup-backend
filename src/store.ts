@@ -1029,8 +1029,10 @@ function refreshDerived(store: AppStore, userId: ID) {
     current = { userId, currentDays: 0, bestDays: 0, updatedAt: now };
     store.streaks.push(current);
   }
-  current.currentDays = calculatedDays;
-  current.bestDays = Math.max(calculatedBest, calculatedDays);
+  // A partial historical upload must not retract an active streak that HansUp
+  // already announced. A true missed day still produces zero and resets it.
+  current.currentDays = calculatedDays > 0 ? Math.max(current.currentDays, calculatedDays) : 0;
+  current.bestDays = Math.max(current.bestDays, calculatedBest, current.currentDays);
   current.updatedAt = now;
 
   refreshBadgesForUser(store, userId);
