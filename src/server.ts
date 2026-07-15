@@ -293,9 +293,9 @@ export function createServer(
       }
 
       if (req.method === "POST" && url.pathname === "/activity/summaries/batch") {
-        const payload = await body<{ summaries: Array<Omit<Parameters<typeof upsertSummary>[1], "userId">> }>(req);
+        const payload = await body<{ summaries: Array<Omit<Parameters<typeof upsertSummary>[1], "userId">>; emitMilestones?: boolean }>(req);
         const inputs = (payload.summaries ?? []).slice(0, 90).map((summary) => ({ ...summary, userId }));
-        const result = upsertSummaries(store, inputs);
+        const result = upsertSummaries(store, inputs, payload.emitMilestones !== false);
         await onChange({ kind: "summary-batch", summaryIds: result.map((item) => item.id), userId });
         const latest = [...result].sort((a, b) => b.localDate.localeCompare(a.localDate))[0];
         info("health_summaries_synced", {

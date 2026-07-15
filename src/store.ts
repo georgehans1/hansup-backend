@@ -551,7 +551,7 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
   return existing ?? summary;
 }
 
-export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>): ActivitySummary[] {
+export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>, emitMilestones = true): ActivitySummary[] {
   if (inputs.length === 0) return [];
   const uniqueInputs = Array.from(new Map(inputs.map((input) => [`${input.userId}:${input.localDate}`, input])).values());
   const userId = uniqueInputs[0].userId;
@@ -560,7 +560,7 @@ export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySumm
   const saved = uniqueInputs.map((input) => upsertSummary(store, input, false));
   refreshDerived(store, userId);
   const currentStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
-  if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
+  if (emitMilestones && currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
   return saved;
 }
 
