@@ -13,6 +13,7 @@ import {
 } from "../src/domain.js";
 import {
   conversationComparison,
+  addChallenge,
   badgeProgressForUser,
   createConversation,
   createDemoStore,
@@ -223,8 +224,9 @@ test("creates friends-only group conversations and message reactions", () => {
   const store = createDemoStore();
   const conversation = createConversation(store, "u_ama", { kind: "group", title: "Run Crew", memberIds: ["u_kofi", "u_eli"] });
   assert.equal(conversation.kind, "group");
-  const reaction = reactToMessage(store, "u_ama", "m_1", "fire");
-  assert.equal(reaction.targetType, "message");
+  const reactions = reactToMessage(store, "u_ama", "m_1", "fire");
+  assert.equal(reactions.find((item) => item.userId === "u_ama")?.targetType, "message");
+  assert.equal(reactToMessage(store, "u_ama", "m_1", "fire").some((item) => item.userId === "u_ama"), false);
 });
 
 test("challenge invitations, rematches, and sharing are functional", () => {
@@ -237,6 +239,16 @@ test("challenge invitations, rematches, and sharing are functional", () => {
 
   const shared = shareChallenge(store, "u_ama", "c_weekend", "conv_squad");
   assert.equal(shared.sharedConversationId, "conv_squad");
+});
+
+test("team challenges balance accepted participants into two persistent teams", () => {
+  const store = createDemoStore();
+  const challenge = addChallenge(store, {
+    creatorId: "u_ama", title: "Team Distance", kind: "distance", template: "group_distance",
+    startsOn: "2026-06-22", endsOn: "2026-06-28", mode: "team", target: 25000,
+    participantIds: ["u_kofi", "u_maya"]
+  });
+  assert.deepEqual(challenge.participants.map((item) => item.teamId), ["team_a", "team_b", "team_a"]);
 });
 
 test("evaluates the expanded badge catalogue and awards badges idempotently", () => {

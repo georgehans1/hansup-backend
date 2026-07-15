@@ -44,6 +44,7 @@ export type PersistenceChange =
   | { kind: "conversation-settings"; conversationId: string; userId: string }
   | { kind: "conversation-leave"; conversationId: string; userId: string }
   | { kind: "reaction"; reactionId: string }
+  | { kind: "message-reactions"; messageId: string }
   | { kind: "challenge"; challengeId: string; includeSharedMessages?: boolean }
   | { kind: "device"; userId: string; token: string }
   | { kind: "report"; reportId: string }
@@ -310,6 +311,12 @@ export class PostgresRepository {
         await this.insertReaction(required(reactions.find((item) => item.id === change.reactionId), "Reaction"));
         return;
       }
+      case "message-reactions": {
+        const message = required(store.messages.find((item) => item.id === change.messageId), "Message");
+        await this.query("delete from reactions where target_type = 'message' and target_id = $1", [change.messageId]);
+        for (const reaction of message.reactions) await this.insertReaction(reaction);
+        return;
+      }
       case "challenge": {
         const challenge = required(store.challenges.find((item) => item.id === change.challengeId), "Challenge");
         await this.insertChallenge(challenge);
@@ -425,6 +432,17 @@ export class PostgresRepository {
           "create table if not exists goal_versions (goal_id text not null references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, kind text not null, target double precision not null, effective_date date not null, primary key(goal_id, effective_date))",
           "insert into goal_versions (goal_id, user_id, kind, target, effective_date) select id, user_id, kind, target, created_at::date from goals on conflict do nothing"
         ]
+      },
+      {
+        id: "010_unique_message_reactions",
+        statements: [
+          "delete from reactions a using reactions b where a.target_type = 'message' and b.target_type = 'message' and a.target_id = b.target_id and a.user_id = b.user_id and (a.created_at < b.created_at or (a.created_at = b.created_at and a.id < b.id))",
+          "create unique index if not exists reactions_message_user_unique on reactions(target_id, user_id) where target_type = 'message'"
+        ]
+      },
+      {
+        id: "011_challenge_teams",
+        statements: ["alter table challenge_participants add column if not exists team_id text"]
       }
     ];
     for (const migration of migrations) {
@@ -635,8 +653,8 @@ export class PostgresRepository {
 
   private insertChallengeParticipant(challengeId: string, participant: Challenge["participants"][number]) {
     return this.query(
-      "insert into challenge_participants (challenge_id, user_id, accepted, score, responded_at) values ($1, $2, $3, $4, $5) on conflict (challenge_id, user_id) do update set accepted = excluded.accepted, score = excluded.score, responded_at = excluded.responded_at",
-      [challengeId, participant.userId, participant.accepted, participant.score, participant.respondedAt]
+      "insert into challenge_participants (challenge_id, user_id, accepted, score, responded_at, team_id) values ($1, $2, $3, $4, $5, $6) on conflict (challenge_id, user_id) do update set accepted = excluded.accepted, score = excluded.score, responded_at = excluded.responded_at, team_id = excluded.team_id",
+      [challengeId, participant.userId, participant.accepted, participant.score, participant.respondedAt, participant.teamId]
     );
   }
 
@@ -835,7 +853,7 @@ function mapChallenge(row: any): Challenge {
 }
 
 function mapChallengeParticipant(row: any): Challenge["participants"][number] {
-  return { userId: row.user_id, accepted: row.accepted, score: row.score, respondedAt: nullableDate(row.responded_at) };
+  return { userId: row.user_id, accepted: row.accepted, score: row.score, respondedAt: nullableDate(row.responded_at), teamId: row.team_id ?? undefined };
 }
 
 function mapFeedItem(row: any): FeedItem {

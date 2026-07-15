@@ -131,6 +131,7 @@ CREATE TABLE challenge_participants (
   accepted boolean NOT NULL DEFAULT false,
   score double precision NOT NULL DEFAULT 0,
   responded_at timestamptz,
+  team_id text,
   PRIMARY KEY(challenge_id, user_id)
 );
 
