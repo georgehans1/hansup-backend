@@ -390,8 +390,8 @@ export function createServer(
       if (req.method === "POST" && messageReaction) {
         const payload = await body<{ kind: any }>(req);
         const result = reactToMessage(store, userId, messageReaction[1], payload.kind);
-        await onChange({ kind: "reaction", reactionId: result.id });
-        return json(res, 201, result);
+        await onChange({ kind: "message-reactions", messageId: messageReaction[1] });
+        return json(res, 200, result);
       }
 
       if (req.method === "POST" && url.pathname === "/challenges") {

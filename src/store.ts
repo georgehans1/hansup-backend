@@ -717,10 +717,16 @@ export function reactToMessage(store: AppStore, userId: ID, messageId: ID, kind:
   const message = store.messages.find((item) => item.id === messageId);
   if (!message) throw new Error("Message not found");
   requireMember(store, userId, message.conversationId);
-  const saved = reaction(`message_reaction_${message.reactions.length + 1}`, "message", messageId, userId, kind, new Date().toISOString());
+  const existing = message.reactions.find((item) => item.userId === userId);
+  if (existing?.kind === kind) {
+    message.reactions = message.reactions.filter((item) => item.id !== existing.id);
+    return message.reactions;
+  }
+  const saved = reaction(`message_reaction_${messageId}_${userId}`, "message", messageId, userId, kind, new Date().toISOString());
+  message.reactions = message.reactions.filter((item) => item.userId !== userId);
   message.reactions.push(saved);
-  if (message.senderId && message.senderId !== userId) notify(store, { userId: message.senderId, actorId: userId, type: "reaction", entityType: "conversation", entityId: message.conversationId, title: "Message reaction", body: `${displayName(store, userId)} reacted to your message.`, deduplicationKey: `message-reaction:${saved.id}` });
-  return saved;
+  if (message.senderId && message.senderId !== userId) notify(store, { userId: message.senderId, actorId: userId, type: "reaction", entityType: "conversation", entityId: message.conversationId, title: "Message reaction", body: `${displayName(store, userId)} reacted to your message.`, deduplicationKey: `message-reaction:${messageId}:${userId}:${kind}` });
+  return message.reactions;
 }
 
 export function conversationComparison(store: AppStore, userId: ID, conversationId: ID, period: LeaderboardPeriod): ActivityComparison {
@@ -740,7 +746,7 @@ export function conversationComparison(store: AppStore, userId: ID, conversation
 
 export function addChallenge(store: AppStore, challenge: Omit<Challenge, "id" | "createdAt" | "status" | "participants"> & { participantIds: ID[] }): Challenge {
   if (challenge.endsOn < challenge.startsOn) throw new Error("Challenge end date must be after its start date");
-  if (challenge.mode === "target" && (!challenge.target || challenge.target <= 0)) throw new Error("Target challenges require a positive target");
+  if (["target", "cooperative", "team"].includes(challenge.mode ?? "") && (!challenge.target || challenge.target <= 0)) throw new Error("This challenge mode requires a positive target");
   for (const participantId of challenge.participantIds) {
     if (participantId !== challenge.creatorId && friendshipStatus(store, challenge.creatorId, participantId) !== "accepted") {
       throw new Error("Challenges can only include friends");
@@ -751,7 +757,7 @@ export function addChallenge(store: AppStore, challenge: Omit<Challenge, "id" | 
     id: `challenge_${store.challenges.length + 1}`,
     status: "inviting",
     mode: challenge.mode ?? "competitive",
-    participants: unique([challenge.creatorId, ...challenge.participantIds]).map((userId) => ({ userId, accepted: userId === challenge.creatorId, score: 0, respondedAt: userId === challenge.creatorId ? new Date().toISOString() : undefined })),
+    participants: unique([challenge.creatorId, ...challenge.participantIds]).map((userId, index) => ({ userId, accepted: userId === challenge.creatorId, score: 0, respondedAt: userId === challenge.creatorId ? new Date().toISOString() : undefined, teamId: challenge.mode === "team" ? (index % 2 === 0 ? "team_a" : "team_b") : undefined })),
     createdAt: new Date().toISOString()
   };
   store.challenges.push(saved);

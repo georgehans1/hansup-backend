@@ -129,6 +129,7 @@ export interface ChallengeParticipant {
   accepted: boolean;
   score: number;
   respondedAt?: string;
+  teamId?: string;
 }
 
 export interface Challenge {
@@ -140,7 +141,7 @@ export interface Challenge {
   startsOn: string;
   endsOn: string;
   status: ChallengeStatus;
-  mode?: "target" | "competitive";
+  mode?: "target" | "competitive" | "cooperative" | "team";
   target?: number;
   participants: ChallengeParticipant[];
   rematchOfChallengeId?: ID;
