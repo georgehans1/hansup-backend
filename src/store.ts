@@ -551,7 +551,7 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
   return existing ?? summary;
 }
 
-export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>): ActivitySummary[] {
+export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">>, emitMilestones = true): ActivitySummary[] {
   if (inputs.length === 0) return [];
   const uniqueInputs = Array.from(new Map(inputs.map((input) => [`${input.userId}:${input.localDate}`, input])).values());
   const userId = uniqueInputs[0].userId;
@@ -560,7 +560,7 @@ export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySumm
   const saved = uniqueInputs.map((input) => upsertSummary(store, input, false));
   refreshDerived(store, userId);
   const currentStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
-  if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
+  if (emitMilestones && currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
   return saved;
 }
 
@@ -1029,10 +1029,8 @@ function refreshDerived(store: AppStore, userId: ID) {
     current = { userId, currentDays: 0, bestDays: 0, updatedAt: now };
     store.streaks.push(current);
   }
-  // A partial historical upload must not retract an active streak that HansUp
-  // already announced. A true missed day still produces zero and resets it.
-  current.currentDays = calculatedDays > 0 ? Math.max(current.currentDays, calculatedDays) : 0;
-  current.bestDays = Math.max(current.bestDays, calculatedBest, current.currentDays);
+  current.currentDays = calculatedDays;
+  current.bestDays = Math.max(calculatedBest, calculatedDays);
   current.updatedAt = now;
 
   refreshBadgesForUser(store, userId);
