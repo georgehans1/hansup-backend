@@ -83,6 +83,39 @@ CREATE TABLE workout_summaries (
   UNIQUE(user_id, healthkit_uuid)
 );
 
+CREATE TABLE workout_heart_rate_summaries (
+  workout_id text PRIMARY KEY REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  average_bpm double precision NOT NULL,
+  minimum_bpm double precision NOT NULL,
+  maximum_bpm double precision NOT NULL,
+  sample_count integer NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE workout_heart_rate_points (
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  recorded_at timestamptz NOT NULL,
+  bpm double precision NOT NULL,
+  sample_count integer NOT NULL,
+  PRIMARY KEY (workout_id, recorded_at)
+);
+
+CREATE INDEX workout_heart_rate_points_workout_time_idx ON workout_heart_rate_points(workout_id, recorded_at);
+
+CREATE TABLE workout_splits (
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  unit text NOT NULL CHECK (unit IN ('kilometer', 'mile')),
+  split_index integer NOT NULL,
+  distance_meters double precision NOT NULL,
+  duration_seconds double precision NOT NULL,
+  pace_seconds_per_km double precision NOT NULL,
+  started_at timestamptz NOT NULL,
+  ended_at timestamptz NOT NULL,
+  is_partial boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workout_id, unit, split_index)
+);
+
 CREATE TABLE goals (
   id text PRIMARY KEY,
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,

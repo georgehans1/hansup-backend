@@ -389,6 +389,15 @@ export function workoutForViewer(store: AppStore, viewerId: ID, workoutId: ID) {
   return privacy?.hideExactNumbers ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;
 }
 
+export function workoutForExactViewer(store: AppStore, viewerId: ID, workoutId: ID) {
+  const workout = workoutForViewer(store, viewerId, workoutId);
+  const original = store.workouts.find((item) => item.id === workoutId)!;
+  if (original.userId !== viewerId && store.settings.find((item) => item.userId === original.userId)?.hideExactNumbers) {
+    throw new Error("Activity details are private");
+  }
+  return workout;
+}
+
 export function summaryForViewer(store: AppStore, viewerId: ID, summaryId: ID) {
   const summary = store.summaries.find((item) => item.id === summaryId);
   if (!summary) throw new Error("Activity not found");

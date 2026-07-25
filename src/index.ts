@@ -18,9 +18,9 @@ if (process.env.NODE_ENV === "production" && missing.length > 0) {
   warn("production_config_missing", { keys: missing });
 }
 
-const { store, persist } = await createProductionContext(config.databaseUrl, useDemoData);
+const { store, persist, heartRate, splits } = await createProductionContext(config.databaseUrl, useDemoData);
 
-createServer(store, config, persist).listen(port, () => {
+createServer(store, config, persist, heartRate, splits).listen(port, () => {
   info("server_started", { port, environment: process.env.NODE_ENV ?? "development", demoData: useDemoData });
 });
 

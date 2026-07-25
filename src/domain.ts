@@ -107,6 +107,41 @@ export interface WorkoutSummary {
   updatedAt: string;
 }
 
+export interface WorkoutHeartRatePoint {
+  recordedAt: string;
+  bpm: number;
+  sampleCount: number;
+}
+
+export interface WorkoutHeartRateDetail {
+  workoutId: ID;
+  averageBPM: number;
+  minimumBPM: number;
+  maximumBPM: number;
+  sampleCount: number;
+  points: WorkoutHeartRatePoint[];
+  updatedAt: string;
+}
+
+export type WorkoutSplitUnit = "kilometer" | "mile";
+
+export interface WorkoutSplit {
+  index: number;
+  unit: WorkoutSplitUnit;
+  distanceMeters: number;
+  durationSeconds: number;
+  paceSecondsPerKm: number;
+  startedAt: string;
+  endedAt: string;
+  isPartial: boolean;
+}
+
+export interface WorkoutSplitsDetail {
+  workoutId: ID;
+  splits: WorkoutSplit[];
+  updatedAt: string;
+}
+
 export interface PersonalRecordAttempt {
   workout: WorkoutSummary;
   elapsedSeconds: number;

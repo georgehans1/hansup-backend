@@ -35,13 +35,59 @@ import {
   shareChallenge,
   upsertSummaries,
   upsertSummary,
-  updateGoal
+  updateGoal,
+  workoutForExactViewer
 } from "../src/store.js";
+import { heartRateDetail, InMemoryWorkoutHeartRateRepository } from "../src/heart-rate.js";
+import { InMemoryWorkoutSplitRepository, normalizeWorkoutSplits } from "../src/splits.js";
 
 const summaries: ActivitySummary[] = [
   makeSummary("2026-06-20", 9000, 3000, 1000, 44, 360),
   makeSummary("2026-06-21", 12000, 4500, 2500, 63, 520)
 ];
+
+test("normalizes heart-rate buckets and calculates a weighted summary", async () => {
+  const repository = new InMemoryWorkoutHeartRateRepository();
+  const detail = await repository.replaceWorkoutHeartRate("workout_1", [
+    { recordedAt: "2026-07-24T06:00:30Z", bpm: 160, sampleCount: 3 },
+    { recordedAt: "2026-07-24T06:00:00Z", bpm: 120, sampleCount: 1 }
+  ]);
+  assert.equal(detail.averageBPM, 150);
+  assert.equal(detail.minimumBPM, 120);
+  assert.equal(detail.maximumBPM, 160);
+  assert.equal(detail.sampleCount, 4);
+  assert.equal(detail.points[0].recordedAt, "2026-07-24T06:00:00.000Z");
+  assert.deepEqual(await repository.getWorkoutHeartRate("workout_1"), detail);
+  assert.throws(() => heartRateDetail("workout_1", [{ recordedAt: "bad", bpm: 100, sampleCount: 1 }]));
+});
+
+test("heart-rate details follow exact activity privacy", () => {
+  const store = createDemoStore();
+  const workout = {
+    id: "workout_privacy", userId: "u_ama", healthkitUUID: "privacy", activityType: "running" as const,
+    startedAt: "2026-07-24T06:00:00Z", endedAt: "2026-07-24T06:30:00Z", durationSeconds: 1_800,
+    distanceMeters: 5_000, calories: 300, source: "healthkit" as const, trustLevel: "verified" as const,
+    updatedAt: "2026-07-24T06:30:00Z"
+  };
+  store.workouts.push(workout);
+  const viewerId = "u_kofi";
+  const settings = store.settings.find((item) => item.userId === workout.userId)!;
+  settings.hideExactNumbers = true;
+  assert.throws(() => workoutForExactViewer(store, viewerId, workout.id), /private/);
+  assert.equal(workoutForExactViewer(store, workout.userId, workout.id).id, workout.id);
+});
+
+test("normalizes and replaces both kilometer and mile workout splits", async () => {
+  const repository = new InMemoryWorkoutSplitRepository();
+  const detail = await repository.replaceWorkoutSplits("workout_1", [
+    { index: 1, unit: "kilometer", distanceMeters: 1_000, durationSeconds: 300, paceSecondsPerKm: 0, startedAt: "2026-07-24T06:00:00Z", endedAt: "2026-07-24T06:05:00Z", isPartial: false },
+    { index: 1, unit: "mile", distanceMeters: 1_609.344, durationSeconds: 480, paceSecondsPerKm: 0, startedAt: "2026-07-24T06:00:00Z", endedAt: "2026-07-24T06:08:00Z", isPartial: false }
+  ]);
+  assert.equal(detail.splits[0].paceSecondsPerKm, 300);
+  assert.equal(detail.splits[1].paceSecondsPerKm, 298.3);
+  assert.deepEqual(await repository.getWorkoutSplits("workout_1"), detail);
+  assert.throws(() => normalizeWorkoutSplits([{ ...detail.splits[0], distanceMeters: 0 }]));
+});
 
 test("scores step, distance, calorie, and active-minute challenges from HealthKit summaries", () => {
   assert.equal(scoreChallenge("steps", summaries), 21000);
