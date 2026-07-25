@@ -18,6 +18,7 @@ import {
   conversationComparison,
   addChallenge,
   badgeProgressForUser,
+  challengeCareerStats,
   createConversation,
   createDemoStore,
   createEmptyStore,
@@ -286,6 +287,8 @@ test("tracks independent streaks and projects the selected home goal", () => {
     pushChallenges: true,
     pushMilestones: true
   });
+  store.conversations.push({ id: "conv_goal_streak", kind: "group", title: "Goal Crew", createdBy: "u_1", createdAt: new Date().toISOString(), mutedBy: [] });
+  store.conversationMembers.push({ conversationId: "conv_goal_streak", userId: "u_1", joinedAt: new Date().toISOString(), role: "owner" });
   const activeMinutes = [40, 0, 40];
   upsertSummaries(store, activeMinutes.map((minutes, index) => {
     const summary = makeSummary(addLocalDays(today, index - 2), 11_000, 4_000, 0, minutes, 300);
@@ -296,6 +299,8 @@ test("tracks independent streaks and projects the selected home goal", () => {
   assert.equal(store.goalStreaks.find((item) => item.goalId === stepGoal.id)?.currentCount, 3);
   assert.equal(store.goalStreaks.find((item) => item.goalId === activeGoal.id)?.currentCount, 1);
   assert.equal(store.streaks.find((item) => item.userId === "u_1")?.currentDays, 1);
+  assert.ok(store.notifications.some((item) => item.type === "streak" && item.entityId === stepGoal.id && item.body.includes("3-day Steps streak")));
+  assert.ok(store.messages.some((item) => item.kind === "system" && item.body.includes("3-day Steps streak")));
   const history = goalHistory(store, "u_1", activeGoal.id, addLocalDays(today, -2), today);
   assert.deepEqual(history.entries.map((item) => item.value), [40, 0, 40]);
 });
@@ -353,6 +358,54 @@ test("challenge invitations, rematches, and sharing are functional", () => {
 
   const shared = shareChallenge(store, "u_ama", "c_weekend", "conv_squad");
   assert.equal(shared.sharedConversationId, "conv_squad");
+});
+
+test("calculates challenge career wins, podiums, and win rate", () => {
+  const store = createEmptyStore();
+  const today = localDateForTimeZone("Africa/Accra");
+  const yesterday = addLocalDays(today, -1);
+  store.summaries.push(
+    { ...makeSummary(yesterday, 12_000, 4_000, 0, 40, 300), id: "career_kofi", userId: "u_kofi" },
+    { ...makeSummary(yesterday, 10_000, 3_500, 0, 35, 260), id: "career_ama", userId: "u_ama" }
+  );
+  store.challenges.push({
+    id: "career_win",
+    creatorId: "u_kofi",
+    title: "Career Win",
+    kind: "steps",
+    template: "weekly_steps",
+    startsOn: yesterday,
+    endsOn: yesterday,
+    status: "completed",
+    mode: "competitive",
+    participants: [
+      { userId: "u_kofi", accepted: true, score: 12_000 },
+      { userId: "u_ama", accepted: true, score: 10_000 }
+    ],
+    createdAt: new Date().toISOString()
+  });
+  const stats = challengeCareerStats(store, "u_kofi");
+
+  assert.equal(stats.entered, 1);
+  assert.equal(stats.completed, 1);
+  assert.equal(stats.wins, 1);
+  assert.equal(stats.podiumFinishes, 1);
+  assert.equal(stats.winRate, 100);
+  assert.equal(stats.favoriteKind, "steps");
+});
+
+test("notification preferences suppress disabled challenge alerts", () => {
+  const store = createDemoStore();
+  const settings = store.settings.find((item) => item.userId === "u_sam");
+  assert.ok(settings);
+  settings!.pushChallenges = false;
+
+  respondChallenge(store, "c_sam_invite", "u_ama", true);
+
+  assert.equal(
+    store.notifications.some((item) => item.deduplicationKey === "challenge-response:c_sam_invite:u_ama"),
+    false
+  );
 });
 
 test("team challenges balance accepted participants into two persistent teams", () => {

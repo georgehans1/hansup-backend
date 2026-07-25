@@ -342,10 +342,27 @@ export interface AppNotification {
 export interface ProfileStats {
   userId: ID;
   lifetimeSteps: number;
+  lifetimeDistanceMeters: number;
+  activeDays: number;
+  workoutCount: number;
+  badgesEarned: number;
   challengeWins: number;
+  currentStreak: number;
   bestStreak: number;
   goalsHit: number;
   friendCount: number;
+}
+
+export interface ChallengeCareerStats {
+  userId: ID;
+  entered: number;
+  completed: number;
+  wins: number;
+  podiumFinishes: number;
+  currentWinStreak: number;
+  bestWinStreak: number;
+  winRate: number;
+  favoriteKind?: ActivityKind;
 }
 
 export interface LeaderboardRow {

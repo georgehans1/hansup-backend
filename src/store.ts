@@ -5,6 +5,7 @@ import {
   ActivitySummary,
   Badge,
   Challenge,
+  ChallengeCareerStats,
   ChallengeParticipant,
   ChallengeTemplate,
   Conversation,
@@ -435,6 +436,7 @@ export function summaryForViewer(store: AppStore, viewerId: ID, summaryId: ID) {
 }
 
 export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
+  const previousStreaks = goalStreakSnapshot(store, userId);
   const allowed = new Set(["walking", "running", "strengthTraining"]);
   const now = new Date().toISOString();
   const savedWorkouts = input.map((workout) => {
@@ -456,6 +458,7 @@ export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<Wo
     return saved;
   });
   refreshDerived(store, userId);
+  emitGoalStreakMilestones(store, userId, previousStreaks);
   return savedWorkouts;
 }
 
@@ -563,7 +566,7 @@ export function profileFriendsFor(store: AppStore, viewerId: ID, userId: ID) {
 }
 
 export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummary, "id" | "source" | "trustLevel" | "updatedAt">, updateDerived = true): ActivitySummary {
-  const previousStreak = store.streaks.find((item) => item.userId === summaryInput.userId)?.currentDays ?? 0;
+  const previousStreaks = goalStreakSnapshot(store, summaryInput.userId);
   const existing = store.summaries.find(
     (item) => item.userId === summaryInput.userId && item.localDate === summaryInput.localDate
   );
@@ -582,8 +585,7 @@ export function upsertSummary(store: AppStore, summaryInput: Omit<ActivitySummar
   }
   if (updateDerived) {
     refreshDerived(store, summary.userId);
-    const currentStreak = store.streaks.find((item) => item.userId === summary.userId)?.currentDays ?? 0;
-    if (currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, summary.userId, `reached a ${currentStreak}-day streak`);
+    emitGoalStreakMilestones(store, summary.userId, previousStreaks);
   }
   return existing ?? summary;
 }
@@ -593,11 +595,10 @@ export function upsertSummaries(store: AppStore, inputs: Array<Omit<ActivitySumm
   const uniqueInputs = Array.from(new Map(inputs.map((input) => [`${input.userId}:${input.localDate}`, input])).values());
   const userId = uniqueInputs[0].userId;
   if (uniqueInputs.some((input) => input.userId !== userId)) throw new Error("Activity summary batches must belong to one user");
-  const previousStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
+  const previousStreaks = goalStreakSnapshot(store, userId);
   const saved = uniqueInputs.map((input) => upsertSummary(store, input, false));
   refreshDerived(store, userId);
-  const currentStreak = store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0;
-  if (emitMilestones && currentStreak > previousStreak && currentStreak > 0) addMilestoneMessages(store, userId, `reached a ${currentStreak}-day streak`);
+  if (emitMilestones) emitGoalStreakMilestones(store, userId, previousStreaks);
   return saved;
 }
 
@@ -833,6 +834,46 @@ export function challengesFor(store: AppStore, userId: ID): Challenge[] {
   return store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId));
 }
 
+export function challengeCareerStats(store: AppStore, userId: ID): ChallengeCareerStats {
+  for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) {
+    refreshChallenge(store, challenge);
+  }
+  const entered = store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId && item.accepted));
+  const completed = entered.filter((challenge) => challenge.status === "completed").sort((a, b) => a.endsOn.localeCompare(b.endsOn));
+  const outcomes = completed.map((challenge) => challengeOutcome(challenge, userId));
+  let currentWinStreak = 0;
+  for (const won of [...outcomes].reverse()) {
+    if (!won) break;
+    currentWinStreak += 1;
+  }
+  let bestWinStreak = 0;
+  let run = 0;
+  for (const won of outcomes) {
+    run = won ? run + 1 : 0;
+    bestWinStreak = Math.max(bestWinStreak, run);
+  }
+  const kindCounts = new Map<ActivityKind, number>();
+  for (const challenge of entered) kindCounts.set(challenge.kind, (kindCounts.get(challenge.kind) ?? 0) + 1);
+  const favoriteKind = [...kindCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  const wins = outcomes.filter(Boolean).length;
+  const podiumFinishes = completed.filter((challenge) => {
+    if (challenge.mode === "cooperative" || challenge.mode === "team") return challengeOutcome(challenge, userId);
+    const ranked = [...challenge.participants].filter((item) => item.accepted).sort((a, b) => b.score - a.score);
+    return ranked.findIndex((item) => item.userId === userId) >= 0 && ranked.findIndex((item) => item.userId === userId) < 3;
+  }).length;
+  return {
+    userId,
+    entered: entered.length,
+    completed: completed.length,
+    wins,
+    podiumFinishes,
+    currentWinStreak,
+    bestWinStreak,
+    winRate: completed.length ? Math.round(wins / completed.length * 100) : 0,
+    favoriteKind
+  };
+}
+
 export function challengeFor(store: AppStore, userId: ID, challengeId: ID): Challenge {
   const challenge = requireChallenge(store, challengeId);
   if (!challenge.participants.some((item) => item.userId === userId)) throw new Error("Challenge participant not found");
@@ -916,6 +957,13 @@ export function deleteNotification(store: AppStore, userId: ID, notificationId: 
 }
 
 function notify(store: AppStore, input: Omit<AppNotification, "id" | "metadata" | "createdAt"> & { metadata?: Record<string, unknown> }) {
+  const settings = store.settings.find((item) => item.userId === input.userId);
+  if (
+    ((input.type === "message" || input.type === "groupAdded") && settings?.pushMessages === false)
+    || ((input.type === "friendRequest" || input.type === "friendAccepted") && settings?.pushFriendRequests === false)
+    || (input.type.startsWith("challenge") && settings?.pushChallenges === false)
+    || (["goal", "streak", "rank", "recap", "personalBest"].includes(input.type) && settings?.pushMilestones === false)
+  ) return;
   if (store.notifications.some((item) => item.deduplicationKey === input.deduplicationKey)) return;
   const metadata = {
     destinationType: input.entityType ?? input.type,
@@ -975,16 +1023,22 @@ export function refreshBadgesForUser(store: AppStore, userId: ID) {
 }
 
 export function profileStats(store: AppStore, userId: ID): ProfileStats {
-  const lifetimeSteps = store.summaries.filter((item) => item.userId === userId).reduce((sum, item) => sum + item.steps, 0);
-  const challengeWins = store.challenges.filter((challenge) => {
-    if (challenge.status !== "completed") return false;
-    const winner = [...challenge.participants].sort((a, b) => b.score - a.score)[0];
-    return winner?.userId === userId;
-  }).length;
+  const userSummaries = store.summaries.filter((item) => item.userId === userId);
+  const userWorkouts = store.workouts.filter((item) => item.userId === userId);
+  const lifetimeSteps = userSummaries.reduce((sum, item) => sum + item.steps, 0);
+  const challengeWins = challengeCareerStats(store, userId).wins;
   return {
     userId,
     lifetimeSteps,
+    lifetimeDistanceMeters: userSummaries.reduce((sum, item) => sum + item.walkingDistanceMeters + item.runningDistanceMeters, 0),
+    activeDays: new Set([
+      ...userSummaries.filter((item) => item.steps > 0 || item.activeMinutes > 0).map((item) => item.localDate),
+      ...userWorkouts.map((item) => item.startedAt.slice(0, 10))
+    ]).size,
+    workoutCount: userWorkouts.length,
+    badgesEarned: store.userBadges.filter((item) => item.userId === userId).length,
     challengeWins,
+    currentStreak: store.streaks.find((item) => item.userId === userId)?.currentDays ?? 0,
     bestStreak: store.streaks.find((item) => item.userId === userId)?.bestDays ?? 0,
     goalsHit: store.goals.filter((goal) => goal.userId === userId).length + Math.floor(lifetimeSteps / 50000),
     friendCount: friendsFor(store, userId).length
@@ -1265,6 +1319,7 @@ export function goalHistory(store: AppStore, userId: ID, goalId: ID, from: strin
 }
 
 function refreshChallenge(store: AppStore, challenge: Challenge) {
+  const previousStatus = challenge.status;
   for (const participant of challenge.participants) {
     if (!participant.accepted) continue;
     const summaries = store.summaries.filter((item) => item.userId === participant.userId && item.localDate >= challenge.startsOn && item.localDate <= challenge.endsOn);
@@ -1277,10 +1332,33 @@ function refreshChallenge(store: AppStore, challenge: Challenge) {
   const today = currentDateForUser(store, challenge.creatorId);
   const invited = challenge.participants.filter((item) => item.userId !== challenge.creatorId);
   const allResponded = invited.every((item) => item.respondedAt);
-  if (today > challenge.endsOn) challenge.status = "completed";
+  if (previousStatus === "completed") challenge.status = "completed";
+  else if (today > challenge.endsOn) challenge.status = "completed";
   else if (allResponded && challenge.participants.filter((item) => item.accepted).length <= 1) challenge.status = "completed";
   else if (allResponded && challenge.participants.filter((item) => item.accepted).length > 1 && today >= challenge.startsOn) challenge.status = "active";
   else challenge.status = "inviting";
+  if (challenge.status === "completed" && previousStatus !== "completed") {
+    for (const participant of challenge.participants.filter((item) => item.accepted)) {
+      const won = challengeOutcome(challenge, participant.userId);
+      notify(store, {
+        userId: participant.userId,
+        type: "challengeUpdate",
+        entityType: "challenge",
+        entityId: challenge.id,
+        title: won ? "Challenge won" : "Challenge complete",
+        body: won ? `You won ${challenge.title}.` : `${challenge.title} has finished. See the final standings.`,
+        deduplicationKey: `challenge-result:${challenge.id}:${participant.userId}`
+      });
+    }
+    if (challenge.sharedConversationId && !store.messages.some((item) => item.id === `message_challenge_result_${challenge.id}`)) {
+      store.messages.push(systemMessage(
+        `message_challenge_result_${challenge.id}`,
+        challenge.sharedConversationId,
+        `${challenge.title} is complete. ${winnerText(challenge, store)}.`,
+        new Date().toISOString()
+      ));
+    }
+  }
 }
 
 export function refreshAllChallenges(store: AppStore): ID[] {
@@ -1335,14 +1413,77 @@ export function generateScheduledNotifications(store: AppStore) {
   }
 }
 
-function addMilestoneMessages(store: AppStore, userId: ID, milestone: string) {
+function goalStreakSnapshot(store: AppStore, userId: ID) {
+  return new Map(store.goalStreaks.filter((item) => item.userId === userId).map((item) => [item.goalId, { current: item.currentCount, best: item.bestCount }]));
+}
+
+function emitGoalStreakMilestones(store: AppStore, userId: ID, previous: Map<ID, { current: number; best: number }>) {
+  const settings = store.settings.find((item) => item.userId === userId);
+  if (settings?.pushMilestones === false) return;
+  for (const streak of store.goalStreaks.filter((item) => item.userId === userId)) {
+    const before = previous.get(streak.goalId) ?? { current: 0, best: 0 };
+    if (streak.currentCount <= before.current || !isNotableStreak(streak.currentCount)) continue;
+    const goal = store.goals.find((item) => item.id === streak.goalId);
+    if (!goal) continue;
+    const unit = goal.cadence === "weekly" ? "week" : "day";
+    const label = activityKindLabel(goal.kind);
+    const personalBest = streak.currentCount > before.best;
+    const body = `${streak.currentCount}-${unit} ${label} streak${personalBest ? ", a new personal best" : ""}`;
+    notify(store, {
+      userId,
+      type: "streak",
+      entityType: "goal",
+      entityId: goal.id,
+      title: `${label} streak`,
+      body: `You reached a ${body}.`,
+      metadata: { goalId: goal.id, goalKind: goal.kind, cadence: goal.cadence, streakCount: streak.currentCount },
+      deduplicationKey: `goal-streak:${goal.id}:${streak.currentCount}`
+    });
+    addMilestoneMessages(store, userId, `reached a ${body}`, `goal-streak:${goal.id}:${streak.currentCount}`);
+  }
+}
+
+function isNotableStreak(value: number) {
+  return [1, 3, 7, 14, 30, 50, 100].includes(value) || (value > 100 && value % 50 === 0);
+}
+
+function activityKindLabel(kind: ActivityKind) {
+  switch (kind) {
+    case "activeMinutes": return "Active Minutes";
+    case "strengthTraining": return "Strength Training";
+    default: return kind.charAt(0).toUpperCase() + kind.slice(1);
+  }
+}
+
+function addMilestoneMessages(store: AppStore, userId: ID, milestone: string, milestoneKey: string) {
   const name = store.users.find((item) => item.id === userId)?.displayName ?? "A friend";
-  const conversationIds = store.conversationMembers.filter((item) => item.userId === userId).map((item) => item.conversationId);
+  const groupIds = new Set(store.conversations.filter((item) => item.kind === "group").map((item) => item.id));
+  const conversationIds = store.conversationMembers
+    .filter((item) => item.userId === userId && groupIds.has(item.conversationId))
+    .map((item) => item.conversationId);
   for (const conversationId of conversationIds) {
     const body = `${name} ${milestone}.`;
-    if (store.messages.some((item) => item.conversationId === conversationId && item.kind === "system" && item.body === body)) continue;
-    store.messages.push(systemMessage(`message_milestone_${Date.now()}_${conversationId}`, conversationId, body, new Date().toISOString()));
+    const id = `message_milestone_${milestoneKey}_${conversationId}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (store.messages.some((item) => item.id === id)) continue;
+    store.messages.push(systemMessage(id, conversationId, body, new Date().toISOString()));
   }
+}
+
+function challengeOutcome(challenge: Challenge, userId: ID): boolean {
+  const accepted = challenge.participants.filter((item) => item.accepted);
+  const participant = accepted.find((item) => item.userId === userId);
+  if (!participant) return false;
+  if (challenge.mode === "cooperative") {
+    return Boolean(challenge.target && accepted.reduce((sum, item) => sum + item.score, 0) >= challenge.target);
+  }
+  if (challenge.mode === "team") {
+    const teamTotals = new Map<string, number>();
+    for (const item of accepted) teamTotals.set(item.teamId ?? "", (teamTotals.get(item.teamId ?? "") ?? 0) + item.score);
+    const best = Math.max(0, ...teamTotals.values());
+    return (teamTotals.get(participant.teamId ?? "") ?? 0) === best && best > 0;
+  }
+  const best = Math.max(0, ...accepted.map((item) => item.score));
+  return participant.score === best && best > 0;
 }
 
 function goalsForStreak(store: AppStore, userId: ID): Goal[] {

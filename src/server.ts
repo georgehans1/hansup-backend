@@ -21,6 +21,7 @@ import {
   addReport,
   conversationComparison,
   challengesFor,
+  challengeCareerStats,
   challengeFor,
   conversationsFor,
   createConversation,
@@ -501,6 +502,10 @@ export function createServer(
         const result = challengesFor(store, userId);
         for (const challenge of result) await onChange({ kind: "challenge", challengeId: challenge.id });
         return json(res, 200, result);
+      }
+
+      if (req.method === "GET" && url.pathname === "/challenges/stats") {
+        return json(res, 200, challengeCareerStats(store, userId));
       }
 
       const challengeDetail = url.pathname.match(/^\/challenges\/([^/]+)$/);
