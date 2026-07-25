@@ -123,6 +123,25 @@ export interface WorkoutHeartRateDetail {
   updatedAt: string;
 }
 
+export type WorkoutSplitUnit = "kilometer" | "mile";
+
+export interface WorkoutSplit {
+  index: number;
+  unit: WorkoutSplitUnit;
+  distanceMeters: number;
+  durationSeconds: number;
+  paceSecondsPerKm: number;
+  startedAt: string;
+  endedAt: string;
+  isPartial: boolean;
+}
+
+export interface WorkoutSplitsDetail {
+  workoutId: ID;
+  splits: WorkoutSplit[];
+  updatedAt: string;
+}
+
 export interface PersonalRecordAttempt {
   workout: WorkoutSummary;
   elapsedSeconds: number;

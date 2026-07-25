@@ -70,6 +70,8 @@ import {
 import { LeaderboardPeriod } from "./domain.js";
 import type { WorkoutHeartRatePoint } from "./domain.js";
 import { InMemoryWorkoutHeartRateRepository, WorkoutHeartRateRepository } from "./heart-rate.js";
+import type { WorkoutSplit } from "./domain.js";
+import { InMemoryWorkoutSplitRepository, WorkoutSplitRepository } from "./splits.js";
 import { sendApnsPush } from "./apns.js";
 import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
@@ -82,7 +84,8 @@ export function createServer(
   store: AppStore = createDemoStore(),
   config: ProductionConfig = productionConfig(),
   persistChange: (change: PersistenceChange) => Promise<void> = async () => {},
-  heartRate: WorkoutHeartRateRepository = new InMemoryWorkoutHeartRateRepository()
+  heartRate: WorkoutHeartRateRepository = new InMemoryWorkoutHeartRateRepository(),
+  splits: WorkoutSplitRepository = new InMemoryWorkoutSplitRepository()
 ) {
   const requestWindows = new Map<string, { startedAt: number; count: number }>();
   let requestSequence = 0;
@@ -239,6 +242,35 @@ export function createServer(
         })) throw new Error("Heart-rate samples must belong to the workout");
         const detail = await heartRate.replaceWorkoutHeartRate(workoutId, payload.points);
         info("workout_heart_rate_saved", { requestId, userId, workoutId, points: detail.points.length, samples: detail.sampleCount });
+        return json(res, 200, detail);
+      }
+      const workoutSplits = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/splits$/);
+      if (req.method === "GET" && workoutSplits) {
+        const workoutId = decodeURIComponent(workoutSplits[1]);
+        workoutForExactViewer(store, userId, workoutId);
+        return json(res, 200, { detail: await splits.getWorkoutSplits(workoutId) ?? null });
+      }
+      if (req.method === "PUT" && workoutSplits) {
+        const workoutId = decodeURIComponent(workoutSplits[1]);
+        const workout = store.workouts.find((item) => item.id === workoutId);
+        if (!workout) throw new Error("Activity not found");
+        if (workout.userId !== userId) throw new Error("Only the activity owner can upload splits");
+        const payload = await body<{ splits: WorkoutSplit[] }>(req);
+        const start = new Date(workout.startedAt).getTime() - 60_000;
+        const end = new Date(workout.endedAt).getTime() + 60_000;
+        if (payload.splits?.some((split) => {
+          const splitStart = new Date(split.startedAt).getTime();
+          const splitEnd = new Date(split.endedAt).getTime();
+          return !Number.isFinite(splitStart) || !Number.isFinite(splitEnd) || splitStart < start || splitEnd > end;
+        })) throw new Error("Splits must belong to the workout");
+        for (const unit of ["kilometer", "mile"] as const) {
+          const unitSplits = payload.splits?.filter((split) => split.unit === unit) ?? [];
+          const distance = unitSplits.reduce((sum, split) => sum + split.distanceMeters, 0);
+          const duration = unitSplits.reduce((sum, split) => sum + split.durationSeconds, 0);
+          if (distance > workout.distanceMeters * 1.1 + 50 || duration > workout.durationSeconds * 1.1 + 60) throw new Error("Split totals exceed the workout");
+        }
+        const detail = await splits.replaceWorkoutSplits(workoutId, payload.splits);
+        info("workout_splits_saved", { requestId, userId, workoutId, splits: detail.splits.length });
         return json(res, 200, detail);
       }
       const workoutDetail = url.pathname.match(/^\/activities\/workouts\/([^/]+)$/);
@@ -520,7 +552,11 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/me/export") {
         const exported = exportAccount(store, userId);
         const workoutIds = store.workouts.filter((item) => item.userId === userId).map((item) => item.id);
-        return json(res, 200, { ...exported, workoutHeartRate: await heartRate.heartRateForWorkoutIds(workoutIds) });
+        return json(res, 200, {
+          ...exported,
+          workoutHeartRate: await heartRate.heartRateForWorkoutIds(workoutIds),
+          workoutSplits: await splits.splitsForWorkoutIds(workoutIds)
+        });
       }
 
       if (req.method === "POST" && url.pathname === "/reports") {

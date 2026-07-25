@@ -39,6 +39,7 @@ import {
   workoutForExactViewer
 } from "../src/store.js";
 import { heartRateDetail, InMemoryWorkoutHeartRateRepository } from "../src/heart-rate.js";
+import { InMemoryWorkoutSplitRepository, normalizeWorkoutSplits } from "../src/splits.js";
 
 const summaries: ActivitySummary[] = [
   makeSummary("2026-06-20", 9000, 3000, 1000, 44, 360),
@@ -74,6 +75,18 @@ test("heart-rate details follow exact activity privacy", () => {
   settings.hideExactNumbers = true;
   assert.throws(() => workoutForExactViewer(store, viewerId, workout.id), /private/);
   assert.equal(workoutForExactViewer(store, workout.userId, workout.id).id, workout.id);
+});
+
+test("normalizes and replaces both kilometer and mile workout splits", async () => {
+  const repository = new InMemoryWorkoutSplitRepository();
+  const detail = await repository.replaceWorkoutSplits("workout_1", [
+    { index: 1, unit: "kilometer", distanceMeters: 1_000, durationSeconds: 300, paceSecondsPerKm: 0, startedAt: "2026-07-24T06:00:00Z", endedAt: "2026-07-24T06:05:00Z", isPartial: false },
+    { index: 1, unit: "mile", distanceMeters: 1_609.344, durationSeconds: 480, paceSecondsPerKm: 0, startedAt: "2026-07-24T06:00:00Z", endedAt: "2026-07-24T06:08:00Z", isPartial: false }
+  ]);
+  assert.equal(detail.splits[0].paceSecondsPerKm, 300);
+  assert.equal(detail.splits[1].paceSecondsPerKm, 298.3);
+  assert.deepEqual(await repository.getWorkoutSplits("workout_1"), detail);
+  assert.throws(() => normalizeWorkoutSplits([{ ...detail.splits[0], distanceMeters: 0 }]));
 });
 
 test("scores step, distance, calorie, and active-minute challenges from HealthKit summaries", () => {
