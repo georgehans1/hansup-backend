@@ -31,6 +31,7 @@ CREATE TABLE sessions (
 
 CREATE TABLE user_settings (
   user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  home_goal_id text,
   hide_activity_from_friends boolean NOT NULL DEFAULT false,
   hide_exact_numbers boolean NOT NULL DEFAULT false,
   searchable boolean NOT NULL DEFAULT true,
@@ -112,6 +113,7 @@ CREATE TABLE workout_splits (
   started_at timestamptz NOT NULL,
   ended_at timestamptz NOT NULL,
   is_partial boolean NOT NULL DEFAULT false,
+  average_heart_rate_bpm double precision,
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workout_id, unit, split_index)
 );
@@ -130,9 +132,20 @@ CREATE TABLE goal_versions (
   goal_id text NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind text NOT NULL,
+  cadence text NOT NULL,
   target double precision NOT NULL,
   effective_date date NOT NULL,
   PRIMARY KEY (goal_id, effective_date)
+);
+
+CREATE TABLE goal_streaks (
+  goal_id text PRIMARY KEY REFERENCES goals(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  cadence text NOT NULL,
+  current_count integer NOT NULL DEFAULT 0,
+  best_count integer NOT NULL DEFAULT 0,
+  last_completed_period date,
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE streaks (

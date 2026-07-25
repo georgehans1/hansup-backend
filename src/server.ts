@@ -7,6 +7,7 @@ import {
   activitySummariesFor,
   activityWorkoutsFor,
   addGoal,
+  goalHistory,
   addMessage,
   addReaction,
   AppStore,
@@ -182,6 +183,13 @@ export function createServer(
       if (req.method === "PATCH" && url.pathname === "/me/settings") {
         const result = updateUserSettings(store, userId, await body(req));
         await onChange({ kind: "settings", userId });
+        return json(res, 200, result);
+      }
+
+      if (req.method === "PATCH" && url.pathname === "/me/settings/home-goal") {
+        const result = updateUserSettings(store, userId, await body<{ homeGoalId: string }>(req));
+        await onChange({ kind: "settings", userId });
+        await onChange({ kind: "derived", userId });
         return json(res, 200, result);
       }
 
@@ -393,6 +401,19 @@ export function createServer(
       }
 
       const goalRoute = url.pathname.match(/^\/goals\/([^/]+)$/);
+      const goalHistoryRoute = url.pathname.match(/^\/goals\/([^/]+)\/history$/);
+      if (req.method === "GET" && goalHistoryRoute) {
+        const today = new Date().toISOString().slice(0, 10);
+        return json(res, 200, goalHistory(
+          store,
+          userId,
+          goalHistoryRoute[1],
+          url.searchParams.get("from") ?? today,
+          url.searchParams.get("to") ?? today,
+          numberParam(url, "limit", 120),
+          numberParam(url, "offset", 0)
+        ));
+      }
       if (req.method === "PATCH" && goalRoute) {
         const result = updateGoal(store, userId, goalRoute[1], await body(req));
         await onChange({ kind: "goal", goalId: result.id, userId });

@@ -79,7 +79,16 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     const summaries = (await this.query("select * from activity_summaries order by local_date")).rows.map(mapSummary);
     const workouts = (await this.query("select * from workout_summaries order by started_at")).rows.map(mapWorkout);
     const goals = (await this.query("select * from goals")).rows.map(mapGoal);
-    const goalVersions = (await this.query("select * from goal_versions order by effective_date")).rows.map((row) => ({ goalId: row.goal_id, userId: row.user_id, kind: row.kind, target: row.target, effectiveDate: dateString(row.effective_date).slice(0, 10) }));
+    const goalVersions = (await this.query("select * from goal_versions order by effective_date")).rows.map((row) => ({ goalId: row.goal_id, userId: row.user_id, kind: row.kind, cadence: row.cadence, target: row.target, effectiveDate: dateString(row.effective_date).slice(0, 10) }));
+    const goalStreaks = (await this.query("select * from goal_streaks")).rows.map((row) => ({
+      goalId: row.goal_id,
+      userId: row.user_id,
+      cadence: row.cadence,
+      currentCount: row.current_count,
+      bestCount: row.best_count,
+      lastCompletedPeriod: row.last_completed_period ? dateString(row.last_completed_period).slice(0, 10) : undefined,
+      updatedAt: dateString(row.updated_at)
+    }));
     const streaks = (await this.query("select * from streaks")).rows.map(mapStreak);
     const challenges = (await this.query("select * from challenges")).rows.map(mapChallenge);
     const participants = (await this.query("select * from challenge_participants")).rows;
@@ -130,6 +139,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       workouts,
       goals,
       goalVersions,
+      goalStreaks,
       streaks,
       challenges,
       feed,
@@ -149,12 +159,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     await this.clearDomainTables();
 
     for (const user of store.users) await this.insertUser(user);
-    for (const settings of store.settings) await this.insertSettings(settings);
     for (const friendship of store.friendships) await this.insertFriendship(friendship);
     for (const summary of store.summaries) await this.insertSummary(summary);
     for (const workout of store.workouts) await this.insertWorkout(workout);
     for (const goal of store.goals) await this.insertGoal(goal);
+    for (const settings of store.settings) await this.insertSettings(settings);
     for (const version of store.goalVersions) await this.insertGoalVersion(version);
+    for (const streak of store.goalStreaks) await this.insertGoalStreak(streak);
     for (const streak of store.streaks) await this.insertStreak(streak);
     for (const badge of store.badges) await this.insertBadge(badge);
     for (const userBadge of store.userBadges) await this.insertUserBadge(userBadge);
@@ -207,11 +218,11 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     switch (change.kind) {
       case "auth": {
         await this.insertUser(required(store.users.find((item) => item.id === change.userId), "User"));
+        for (const goal of store.goals.filter((item) => item.userId === change.userId)) await this.insertGoal(goal);
         const settings = store.settings.find((item) => item.userId === change.userId);
         if (settings) await this.insertSettings(settings);
-        const streak = store.streaks.find((item) => item.userId === change.userId);
-        if (streak) await this.insertStreak(streak);
-        for (const goal of store.goals.filter((item) => item.userId === change.userId)) await this.insertGoal(goal);
+        for (const version of store.goalVersions.filter((item) => item.userId === change.userId)) await this.insertGoalVersion(version);
+        await this.persistDerivedActivity(store, change.userId);
         return;
       }
       case "notifications":
@@ -424,9 +435,9 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       await query("delete from workout_splits where workout_id = $1", [workoutId]);
       for (const split of splits) {
         await query(
-          `insert into workout_splits (workout_id, unit, split_index, distance_meters, duration_seconds, pace_seconds_per_km, started_at, ended_at, is_partial, updated_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [workoutId, split.unit, split.index, split.distanceMeters, split.durationSeconds, split.paceSecondsPerKm, split.startedAt, split.endedAt, split.isPartial, updatedAt]
+          `insert into workout_splits (workout_id, unit, split_index, distance_meters, duration_seconds, pace_seconds_per_km, started_at, ended_at, is_partial, average_heart_rate_bpm, updated_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [workoutId, split.unit, split.index, split.distanceMeters, split.durationSeconds, split.paceSecondsPerKm, split.startedAt, split.endedAt, split.isPartial, split.averageHeartRateBPM ?? null, updatedAt]
         );
       }
     });
@@ -495,8 +506,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       {
         id: "009_goal_versions",
         statements: [
-          "create table if not exists goal_versions (goal_id text not null references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, kind text not null, target double precision not null, effective_date date not null, primary key(goal_id, effective_date))",
-          "insert into goal_versions (goal_id, user_id, kind, target, effective_date) select id, user_id, kind, target, created_at::date from goals on conflict do nothing"
+          "create table if not exists goal_versions (goal_id text not null references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, kind text not null, cadence text, target double precision not null, effective_date date not null, primary key(goal_id, effective_date))",
+          "insert into goal_versions (goal_id, user_id, kind, cadence, target, effective_date) select id, user_id, kind, cadence, target, created_at::date from goals on conflict do nothing"
         ]
       },
       {
@@ -521,7 +532,25 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       {
         id: "013_workout_splits",
         statements: [
-          "create table if not exists workout_splits (workout_id text not null references workout_summaries(id) on delete cascade, unit text not null check (unit in ('kilometer', 'mile')), split_index integer not null, distance_meters double precision not null, duration_seconds double precision not null, pace_seconds_per_km double precision not null, started_at timestamptz not null, ended_at timestamptz not null, is_partial boolean not null default false, updated_at timestamptz not null default now(), primary key(workout_id, unit, split_index))"
+          "create table if not exists workout_splits (workout_id text not null references workout_summaries(id) on delete cascade, unit text not null check (unit in ('kilometer', 'mile')), split_index integer not null, distance_meters double precision not null, duration_seconds double precision not null, pace_seconds_per_km double precision not null, started_at timestamptz not null, ended_at timestamptz not null, is_partial boolean not null default false, average_heart_rate_bpm double precision, updated_at timestamptz not null default now(), primary key(workout_id, unit, split_index))"
+        ]
+      },
+      {
+        id: "014_split_heart_rate",
+        statements: [
+          "alter table workout_splits add column if not exists average_heart_rate_bpm double precision"
+        ]
+      },
+      {
+        id: "015_goal_streaks_home_goal",
+        statements: [
+          "alter table user_settings add column if not exists home_goal_id text",
+          "alter table goal_versions add column if not exists cadence text",
+          "update goal_versions set cadence = goals.cadence from goals where goal_versions.goal_id = goals.id and goal_versions.cadence is null",
+          "alter table goal_versions alter column cadence set not null",
+          "create table if not exists goal_streaks (goal_id text primary key references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, cadence text not null, current_count integer not null default 0, best_count integer not null default 0, last_completed_period date, updated_at timestamptz not null default now())",
+          "create index if not exists goal_streaks_user_idx on goal_streaks(user_id)",
+          "do $$ begin if not exists (select 1 from pg_constraint where conname = 'user_settings_home_goal_id_fkey') then alter table user_settings add constraint user_settings_home_goal_id_fkey foreign key (home_goal_id) references goals(id) on delete set null; end if; end $$"
         ]
       }
     ];
@@ -549,6 +578,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
        delete from user_badges;
        delete from badges;
        delete from streaks;
+       delete from goal_streaks;
        delete from goal_versions;
        delete from goals;
        delete from workout_summaries;
@@ -573,8 +603,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   }
 
   private async persistDerivedActivity(store: AppStore, userId: string) {
+    const settings = store.settings.find((item) => item.userId === userId);
+    if (settings) await this.insertSettings(settings);
     const streak = store.streaks.find((item) => item.userId === userId);
     if (streak) await this.insertStreak(streak);
+    for (const goalStreak of store.goalStreaks.filter((item) => item.userId === userId)) {
+      await this.insertGoalStreak(goalStreak);
+    }
     for (const badge of store.userBadges.filter((item) => item.userId === userId)) {
       await this.insertUserBadge(badge);
     }
@@ -656,12 +691,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   private insertSettings(settings: UserSettings) {
     return this.query(
       `insert into user_settings
-        (user_id, hide_activity_from_friends, hide_exact_numbers, searchable, push_messages, push_friend_requests, push_challenges, push_milestones)
-       values ($1, $2, $3, $4, $5, $6, $7, $8)
+        (user_id, home_goal_id, hide_activity_from_friends, hide_exact_numbers, searchable, push_messages, push_friend_requests, push_challenges, push_milestones)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        on conflict (user_id) do update set hide_activity_from_friends = excluded.hide_activity_from_friends,
+         home_goal_id = excluded.home_goal_id,
          hide_exact_numbers = excluded.hide_exact_numbers, searchable = excluded.searchable, push_messages = excluded.push_messages,
          push_friend_requests = excluded.push_friend_requests, push_challenges = excluded.push_challenges, push_milestones = excluded.push_milestones`,
-      [settings.userId, settings.hideActivityFromFriends, settings.hideExactNumbers, settings.searchable, settings.pushMessages, settings.pushFriendRequests, settings.pushChallenges, settings.pushMilestones]
+      [settings.userId, settings.homeGoalId, settings.hideActivityFromFriends, settings.hideExactNumbers, settings.searchable, settings.pushMessages, settings.pushFriendRequests, settings.pushChallenges, settings.pushMilestones]
     );
   }
 
@@ -695,8 +731,18 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   private insertGoalVersion(version: AppStore["goalVersions"][number]) {
     return this.query(
-      "insert into goal_versions (goal_id, user_id, kind, target, effective_date) values ($1, $2, $3, $4, $5) on conflict (goal_id, effective_date) do update set kind = excluded.kind, target = excluded.target",
-      [version.goalId, version.userId, version.kind, version.target, version.effectiveDate]
+      "insert into goal_versions (goal_id, user_id, kind, cadence, target, effective_date) values ($1, $2, $3, $4, $5, $6) on conflict (goal_id, effective_date) do update set kind = excluded.kind, cadence = excluded.cadence, target = excluded.target",
+      [version.goalId, version.userId, version.kind, version.cadence, version.target, version.effectiveDate]
+    );
+  }
+
+  private insertGoalStreak(streak: AppStore["goalStreaks"][number]) {
+    return this.query(
+      `insert into goal_streaks (goal_id, user_id, cadence, current_count, best_count, last_completed_period, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (goal_id) do update set cadence = excluded.cadence, current_count = excluded.current_count,
+         best_count = excluded.best_count, last_completed_period = excluded.last_completed_period, updated_at = excluded.updated_at`,
+      [streak.goalId, streak.userId, streak.cadence, streak.currentCount, streak.bestCount, streak.lastCompletedPeriod, streak.updatedAt]
     );
   }
 
@@ -859,7 +905,8 @@ function mapWorkoutSplits(workoutId: string, rows: any[]): WorkoutSplitsDetail {
     updatedAt: rows.reduce((latest, row) => latest > dateString(row.updated_at) ? latest : dateString(row.updated_at), ""),
     splits: rows.map((row) => ({
       index: Number(row.split_index), unit: row.unit, distanceMeters: Number(row.distance_meters), durationSeconds: Number(row.duration_seconds),
-      paceSecondsPerKm: Number(row.pace_seconds_per_km), startedAt: dateString(row.started_at), endedAt: dateString(row.ended_at), isPartial: Boolean(row.is_partial)
+      paceSecondsPerKm: Number(row.pace_seconds_per_km), startedAt: dateString(row.started_at), endedAt: dateString(row.ended_at), isPartial: Boolean(row.is_partial),
+      averageHeartRateBPM: row.average_heart_rate_bpm == null ? undefined : Number(row.average_heart_rate_bpm)
     }))
   };
 }
@@ -881,6 +928,7 @@ function mapUser(row: any): User {
 function mapSettings(row: any): UserSettings {
   return {
     userId: row.user_id,
+    homeGoalId: row.home_goal_id ?? undefined,
     hideActivityFromFriends: row.hide_activity_from_friends,
     hideExactNumbers: row.hide_exact_numbers,
     searchable: row.searchable,

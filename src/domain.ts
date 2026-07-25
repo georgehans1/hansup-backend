@@ -49,6 +49,7 @@ export interface PublicUserProfile {
 
 export interface UserSettings {
   userId: ID;
+  homeGoalId?: ID;
   hideActivityFromFriends: boolean;
   hideExactNumbers: boolean;
   searchable: boolean;
@@ -134,6 +135,7 @@ export interface WorkoutSplit {
   startedAt: string;
   endedAt: string;
   isPartial: boolean;
+  averageHeartRateBPM?: number;
 }
 
 export interface WorkoutSplitsDetail {
@@ -181,6 +183,32 @@ export interface Streak {
   currentDays: number;
   bestDays: number;
   updatedAt: string;
+}
+
+export interface GoalStreak {
+  goalId: ID;
+  userId: ID;
+  cadence: GoalCadence;
+  currentCount: number;
+  bestCount: number;
+  lastCompletedPeriod?: string;
+  updatedAt: string;
+}
+
+export interface GoalHistoryEntry {
+  periodStart: string;
+  periodEnd: string;
+  value: number;
+  target: number;
+  completed: boolean;
+  steps: number;
+  distanceMeters: number;
+  walkingDistanceMeters: number;
+  runningDistanceMeters: number;
+  activeMinutes: number;
+  calories: number;
+  strengthSessions: number;
+  strengthMinutes: number;
 }
 
 export interface ChallengeParticipant {
