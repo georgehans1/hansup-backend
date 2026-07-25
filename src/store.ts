@@ -15,6 +15,8 @@ import {
   ID,
   LeaderboardPeriod,
   Message,
+  PersonalRecordAttempt,
+  PersonalRecordLab,
   ProfileStats,
   Reaction,
   ReactionKind,
@@ -1012,6 +1014,56 @@ export function personalBestsFor(store: AppStore, viewerId: ID, userId: ID) {
   return lifetimePersonalBests(store, userId);
 }
 
+export function personalRecordLabFor(store: AppStore, viewerId: ID, userId: ID): PersonalRecordLab {
+  const status = friendshipStatus(store, viewerId, userId);
+  const privacy = store.settings.find((item) => item.userId === userId);
+  if (viewerId !== userId && (status !== "accepted" || privacy?.hideActivityFromFriends || privacy?.hideExactNumbers)) {
+    throw new Error("Activity is not visible");
+  }
+
+  const runs = store.workouts
+    .filter((item) => item.userId === userId && item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
+
+  const distances = [1_000, 5_000, 10_000, 21_097.5].map((distanceMeters) => {
+    let recordSeconds = Number.POSITIVE_INFINITY;
+    const chronological = runs
+      .filter((item) => item.distanceMeters >= distanceMeters)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+      .map((workout): PersonalRecordAttempt => {
+        const elapsedSeconds = Math.round(workout.durationSeconds * distanceMeters / workout.distanceMeters);
+        const isPersonalBest = elapsedSeconds < recordSeconds;
+        recordSeconds = Math.min(recordSeconds, elapsedSeconds);
+        return {
+          workout,
+          elapsedSeconds,
+          paceSecondsPerKm: Math.round(workout.durationSeconds / (workout.distanceMeters / 1_000)),
+          isPersonalBest
+        };
+      });
+
+    const ranked = [...chronological].sort((left, right) => left.elapsedSeconds - right.elapsedSeconds);
+    const newest = [...chronological].sort((left, right) => right.workout.startedAt.localeCompare(left.workout.startedAt));
+    const recent = newest.slice(0, 5);
+    const best = ranked[0];
+    const latest = newest[0];
+    const first = chronological[0];
+    return {
+      distanceMeters,
+      totalAttempts: chronological.length,
+      best,
+      latest,
+      improvementSeconds: best && first ? Math.max(first.elapsedSeconds - best.elapsedSeconds, 0) : 0,
+      latestGapSeconds: best && latest ? Math.max(latest.elapsedSeconds - best.elapsedSeconds, 0) : 0,
+      recentAveragePaceSecondsPerKm: recent.length
+        ? Math.round(recent.reduce((sum, item) => sum + item.paceSecondsPerKm, 0) / recent.length)
+        : 0,
+      attempts: newest.slice(0, 60)
+    };
+  });
+
+  return { userId, generatedAt: new Date().toISOString(), distances };
+}
+
 export function userSummaries(store: AppStore, viewerId: ID, ids: ID[]) {
   return unique(ids).slice(0, 100).map((id) => publicProfile(store, viewerId, id));
 }
@@ -1112,7 +1164,14 @@ export function addDailyGroupChallengeUpdates(store: AppStore, now = new Date())
         return `${index + 1}. ${name}: ${Math.round(participant.score).toLocaleString("en-US")}`;
       })
       .join(" | ");
-    const body = `${challenge.title} progress for ${localDate}: ${ranking || "No activity recorded yet."}`;
+    const accepted = challenge.participants.filter((participant) => participant.accepted);
+    const squadScore = accepted.reduce((sum, participant) => sum + participant.score, 0);
+    const targetText = challenge.target
+      ? `${Math.round(squadScore).toLocaleString("en-US")} of ${Math.round(challenge.target).toLocaleString("en-US")}`
+      : Math.round(squadScore).toLocaleString("en-US");
+    const body = challenge.mode === "cooperative"
+      ? `${challenge.title} squad progress for ${localDate}: ${targetText}. Contributions: ${ranking || "No activity recorded yet."}`
+      : `${challenge.title} progress for ${localDate}: ${ranking || "No activity recorded yet."}`;
     store.messages.push(systemMessage(messageId, challenge.sharedConversationId, body, now.toISOString()));
     for (const participant of challenge.participants.filter((item) => item.accepted)) notify(store, { userId: participant.userId, type: "challengeUpdate", entityType: "challenge", entityId: challenge.id, title: "Challenge progress", body, deduplicationKey: `challenge-daily:${challenge.id}:${localDate}:${participant.userId}` });
     changed.push(challenge.id);
@@ -1234,6 +1293,11 @@ function requireMember(store: AppStore, userId: ID, conversationId: ID) {
 }
 
 function winnerText(challenge: Challenge, store: AppStore) {
+  if (challenge.mode === "cooperative") {
+    const total = challenge.participants.filter((item) => item.accepted).reduce((sum, item) => sum + item.score, 0);
+    const outcome = challenge.target && total >= challenge.target ? "reached the goal" : "finished";
+    return `the squad ${outcome} with ${Math.round(total).toLocaleString()} points`;
+  }
   const winner = [...challenge.participants].sort((a, b) => b.score - a.score)[0];
   const name = store.users.find((item) => item.id === winner?.userId)?.displayName ?? "Someone";
   return `${name} won with ${Math.round(winner?.score ?? 0).toLocaleString()} points`;

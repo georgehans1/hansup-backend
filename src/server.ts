@@ -41,6 +41,7 @@ import {
   deleteNotification,
   lifetimePersonalBests,
   personalBestsFor,
+  personalRecordLabFor,
   userSummaries,
   profileActivity,
   profileFriendsFor,
@@ -224,8 +225,13 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/me/personal-bests") {
         return json(res, 200, lifetimePersonalBests(store, userId));
       }
+      if (req.method === "GET" && url.pathname === "/me/record-lab") {
+        return json(res, 200, personalRecordLabFor(store, userId, userId));
+      }
       const userPersonalBests = url.pathname.match(/^\/users\/([^/]+)\/personal-bests$/);
       if (req.method === "GET" && userPersonalBests) return json(res, 200, personalBestsFor(store, userId, userPersonalBests[1]));
+      const userRecordLab = url.pathname.match(/^\/users\/([^/]+)\/record-lab$/);
+      if (req.method === "GET" && userRecordLab) return json(res, 200, personalRecordLabFor(store, userId, userRecordLab[1]));
       if (req.method === "POST" && url.pathname === "/users/summaries") {
         const payload = await body<{ ids: string[] }>(req);
         return json(res, 200, userSummaries(store, userId, payload.ids ?? []));

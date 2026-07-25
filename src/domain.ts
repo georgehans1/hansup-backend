@@ -107,6 +107,30 @@ export interface WorkoutSummary {
   updatedAt: string;
 }
 
+export interface PersonalRecordAttempt {
+  workout: WorkoutSummary;
+  elapsedSeconds: number;
+  paceSecondsPerKm: number;
+  isPersonalBest: boolean;
+}
+
+export interface PersonalRecordDistance {
+  distanceMeters: number;
+  totalAttempts: number;
+  best?: PersonalRecordAttempt;
+  latest?: PersonalRecordAttempt;
+  improvementSeconds: number;
+  latestGapSeconds: number;
+  recentAveragePaceSecondsPerKm: number;
+  attempts: PersonalRecordAttempt[];
+}
+
+export interface PersonalRecordLab {
+  userId: ID;
+  generatedAt: string;
+  distances: PersonalRecordDistance[];
+}
+
 export interface Goal {
   id: ID;
   userId: ID;

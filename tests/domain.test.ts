@@ -12,6 +12,7 @@ import {
   scoreChallenge
 } from "../src/domain.js";
 import {
+  addDailyGroupChallengeUpdates,
   conversationComparison,
   addChallenge,
   badgeProgressForUser,
@@ -20,6 +21,7 @@ import {
   createEmptyStore,
   friendLeaderboard,
   lifetimePersonalBests,
+  personalRecordLabFor,
   profileActivity,
   profileFriendsFor,
   profileStats,
@@ -71,6 +73,32 @@ test("ranks users with deterministic tie ordering", () => {
     { userId: "a", score: 10, rank: 1 },
     { userId: "b", score: 10, rank: 2 }
   ]);
+});
+
+test("builds personal record lab progression and recent pace statistics", () => {
+  const store = createDemoStore();
+  store.workouts.push(
+    {
+      id: "run_old", userId: "u_ama", healthkitUUID: "run_old", activityType: "running",
+      startedAt: "2026-05-01T07:00:00Z", endedAt: "2026-05-01T07:30:00Z",
+      durationSeconds: 1_800, distanceMeters: 5_000, calories: 300,
+      source: "healthkit", trustLevel: "verified", updatedAt: "2026-05-01T07:30:00Z"
+    },
+    {
+      id: "run_new", userId: "u_ama", healthkitUUID: "run_new", activityType: "running",
+      startedAt: "2026-06-01T07:00:00Z", endedAt: "2026-06-01T07:25:00Z",
+      durationSeconds: 1_500, distanceMeters: 5_000, calories: 280,
+      source: "healthkit", trustLevel: "verified", updatedAt: "2026-06-01T07:25:00Z"
+    }
+  );
+
+  const lab = personalRecordLabFor(store, "u_ama", "u_ama");
+  const fiveK = lab.distances.find((item) => item.distanceMeters === 5_000);
+  assert.equal(fiveK?.totalAttempts, 2);
+  assert.equal(fiveK?.best?.elapsedSeconds, 1_500);
+  assert.equal(fiveK?.improvementSeconds, 300);
+  assert.equal(fiveK?.latestGapSeconds, 0);
+  assert.equal(fiveK?.attempts.filter((item) => item.isPersonalBest).length, 2);
 });
 
 test("builds leaderboard rows for all supported activity comparison metrics", () => {
@@ -249,6 +277,24 @@ test("team challenges balance accepted participants into two persistent teams", 
     participantIds: ["u_kofi", "u_maya"]
   });
   assert.deepEqual(challenge.participants.map((item) => item.teamId), ["team_a", "team_b", "team_a"]);
+});
+
+test("posts combined squad-goal progress to its group chat", () => {
+  const store = createDemoStore();
+  const challenge = addChallenge(store, {
+    creatorId: "u_ama", title: "Squad 100K", kind: "steps", template: "weekly_steps",
+    startsOn: "2026-06-20", endsOn: "2026-06-28", mode: "cooperative", target: 100_000,
+    participantIds: ["u_kofi"], sharedConversationId: "conv_squad"
+  });
+  respondChallenge(store, challenge.id, "u_kofi", true);
+
+  const changed = addDailyGroupChallengeUpdates(store, new Date("2026-06-23T08:00:00Z"));
+  const update = store.messages.find((message) => message.id === `message_challenge_daily_${challenge.id}_2026-06-22`);
+
+  assert.deepEqual(changed, [challenge.id]);
+  assert.match(update?.body ?? "", /squad progress/i);
+  assert.match(update?.body ?? "", /of 100,000/i);
+  assert.match(update?.body ?? "", /Contributions:/);
 });
 
 test("evaluates the expanded badge catalogue and awards badges idempotently", () => {
