@@ -64,9 +64,12 @@ import {
   upsertWorkouts,
   weeklyRecapFor,
   workoutForViewer,
+  workoutForExactViewer,
   summaryForViewer
 } from "./store.js";
 import { LeaderboardPeriod } from "./domain.js";
+import type { WorkoutHeartRatePoint } from "./domain.js";
+import { InMemoryWorkoutHeartRateRepository, WorkoutHeartRateRepository } from "./heart-rate.js";
 import { sendApnsPush } from "./apns.js";
 import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
@@ -78,7 +81,8 @@ const demoUserId = "u_ama";
 export function createServer(
   store: AppStore = createDemoStore(),
   config: ProductionConfig = productionConfig(),
-  persistChange: (change: PersistenceChange) => Promise<void> = async () => {}
+  persistChange: (change: PersistenceChange) => Promise<void> = async () => {},
+  heartRate: WorkoutHeartRateRepository = new InMemoryWorkoutHeartRateRepository()
 ) {
   const requestWindows = new Map<string, { startedAt: number; count: number }>();
   let requestSequence = 0;
@@ -214,6 +218,28 @@ export function createServer(
       }
       if (req.method === "GET" && url.pathname === "/activity/workouts") {
         return json(res, 200, activityWorkoutsFor(store, userId, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, type: url.searchParams.get("type") ?? undefined, before: url.searchParams.get("before") ?? undefined, limit: numberParam(url, "limit", 50) }));
+      }
+      const workoutHeartRate = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/heart-rate$/);
+      if (req.method === "GET" && workoutHeartRate) {
+        const workoutId = decodeURIComponent(workoutHeartRate[1]);
+        workoutForExactViewer(store, userId, workoutId);
+        return json(res, 200, { detail: await heartRate.getWorkoutHeartRate(workoutId) ?? null });
+      }
+      if (req.method === "PUT" && workoutHeartRate) {
+        const workoutId = decodeURIComponent(workoutHeartRate[1]);
+        const workout = store.workouts.find((item) => item.id === workoutId);
+        if (!workout) throw new Error("Activity not found");
+        if (workout.userId !== userId) throw new Error("Only the activity owner can upload heart rate");
+        const payload = await body<{ points: WorkoutHeartRatePoint[] }>(req);
+        const start = new Date(workout.startedAt).getTime() - 60_000;
+        const end = new Date(workout.endedAt).getTime() + 60_000;
+        if (payload.points?.some((point) => {
+          const timestamp = new Date(point.recordedAt).getTime();
+          return !Number.isFinite(timestamp) || timestamp < start || timestamp > end;
+        })) throw new Error("Heart-rate samples must belong to the workout");
+        const detail = await heartRate.replaceWorkoutHeartRate(workoutId, payload.points);
+        info("workout_heart_rate_saved", { requestId, userId, workoutId, points: detail.points.length, samples: detail.sampleCount });
+        return json(res, 200, detail);
       }
       const workoutDetail = url.pathname.match(/^\/activities\/workouts\/([^/]+)$/);
       if (req.method === "GET" && workoutDetail) return json(res, 200, workoutForViewer(store, userId, decodeURIComponent(workoutDetail[1])));
@@ -492,7 +518,9 @@ export function createServer(
       }
 
       if (req.method === "GET" && url.pathname === "/me/export") {
-        return json(res, 200, exportAccount(store, userId));
+        const exported = exportAccount(store, userId);
+        const workoutIds = store.workouts.filter((item) => item.userId === userId).map((item) => item.id);
+        return json(res, 200, { ...exported, workoutHeartRate: await heartRate.heartRateForWorkoutIds(workoutIds) });
       }
 
       if (req.method === "POST" && url.pathname === "/reports") {
@@ -519,7 +547,7 @@ function json(res: any, status: number, payload: unknown) {
   res.writeHead(status, {
     "content-type": "application/json",
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "access-control-allow-headers": "content-type,x-user-id,authorization"
   });
   res.end(JSON.stringify(payload));

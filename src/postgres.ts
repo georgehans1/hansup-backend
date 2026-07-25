@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { info } from "./logger.js";
 import { AppStore, createDemoStore, createEmptyStore, defaultBadges, refreshDerivedForUser } from "./store.js";
+import { heartRateDetail, InMemoryWorkoutHeartRateRepository, WorkoutHeartRateRepository } from "./heart-rate.js";
 import {
   ActivitySummary,
   AppNotification,
@@ -19,6 +20,7 @@ import {
   UserSettings,
   WorkoutSummary
 } from "./domain.js";
+import type { WorkoutHeartRateDetail, WorkoutHeartRatePoint } from "./domain.js";
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 type TransactionFn = (work: (query: QueryFn) => Promise<void>) => Promise<void>;
@@ -51,7 +53,7 @@ export type PersistenceChange =
   | { kind: "notifications" }
   | { kind: "notification-delete"; notificationId: string; userId: string };
 
-export class PostgresRepository {
+export class PostgresRepository implements WorkoutHeartRateRepository {
   constructor(
     private readonly query: QueryFn,
     private readonly transaction: TransactionFn = async (work) => work(query)
@@ -373,6 +375,41 @@ export class PostgresRepository {
     return mapSummary(result.rows[0]);
   }
 
+  async getWorkoutHeartRate(workoutId: string): Promise<WorkoutHeartRateDetail | undefined> {
+    const summary = await this.query("select * from workout_heart_rate_summaries where workout_id = $1", [workoutId]);
+    if (!summary.rows[0]) return undefined;
+    const points = await this.query("select * from workout_heart_rate_points where workout_id = $1 order by recorded_at", [workoutId]);
+    return mapHeartRateDetail(summary.rows[0], points.rows);
+  }
+
+  async replaceWorkoutHeartRate(workoutId: string, rawPoints: WorkoutHeartRatePoint[]): Promise<WorkoutHeartRateDetail> {
+    const detail = heartRateDetail(workoutId, rawPoints);
+    await this.transaction(async (query) => {
+      await query("delete from workout_heart_rate_points where workout_id = $1", [workoutId]);
+      await query(
+        `insert into workout_heart_rate_summaries (workout_id, average_bpm, minimum_bpm, maximum_bpm, sample_count, updated_at)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (workout_id) do update set average_bpm = excluded.average_bpm, minimum_bpm = excluded.minimum_bpm,
+           maximum_bpm = excluded.maximum_bpm, sample_count = excluded.sample_count, updated_at = excluded.updated_at`,
+        [workoutId, detail.averageBPM, detail.minimumBPM, detail.maximumBPM, detail.sampleCount, detail.updatedAt]
+      );
+      for (const point of detail.points) {
+        await query(
+          "insert into workout_heart_rate_points (workout_id, recorded_at, bpm, sample_count) values ($1, $2, $3, $4)",
+          [workoutId, point.recordedAt, point.bpm, point.sampleCount]
+        );
+      }
+    });
+    return detail;
+  }
+
+  async heartRateForWorkoutIds(workoutIds: string[]): Promise<WorkoutHeartRateDetail[]> {
+    if (workoutIds.length === 0) return [];
+    const summaries = await this.query("select * from workout_heart_rate_summaries where workout_id = any($1::text[])", [workoutIds]);
+    const points = await this.query("select * from workout_heart_rate_points where workout_id = any($1::text[]) order by recorded_at", [workoutIds]);
+    return summaries.rows.map((summary) => mapHeartRateDetail(summary, points.rows.filter((point) => point.workout_id === summary.workout_id)));
+  }
+
   async seedBadges(badges: Badge[]): Promise<void> {
     for (const badge of badges) await this.insertBadge(badge);
   }
@@ -443,6 +480,14 @@ export class PostgresRepository {
       {
         id: "011_challenge_teams",
         statements: ["alter table challenge_participants add column if not exists team_id text"]
+      },
+      {
+        id: "012_workout_heart_rate",
+        statements: [
+          "create table if not exists workout_heart_rate_summaries (workout_id text primary key references workout_summaries(id) on delete cascade, average_bpm double precision not null, minimum_bpm double precision not null, maximum_bpm double precision not null, sample_count integer not null, updated_at timestamptz not null default now())",
+          "create table if not exists workout_heart_rate_points (workout_id text not null references workout_summaries(id) on delete cascade, recorded_at timestamptz not null, bpm double precision not null, sample_count integer not null, primary key(workout_id, recorded_at))",
+          "create index if not exists workout_heart_rate_points_workout_time_idx on workout_heart_rate_points(workout_id, recorded_at)"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -732,10 +777,10 @@ export async function createProductionSeedStore(databaseUrl?: string, useDemoDat
   return store;
 }
 
-export async function createProductionContext(databaseUrl?: string, useDemoData = false): Promise<{ store: AppStore; persist: (change: PersistenceChange) => Promise<void> }> {
+export async function createProductionContext(databaseUrl?: string, useDemoData = false): Promise<{ store: AppStore; persist: (change: PersistenceChange) => Promise<void>; heartRate: WorkoutHeartRateRepository }> {
   if (!databaseUrl) {
     const store = useDemoData ? createDemoStore() : createEmptyStore();
-    return { store, persist: async () => {} };
+    return { store, persist: async () => {}, heartRate: new InMemoryWorkoutHeartRateRepository() };
   }
 
   const repository = await createProductionRepository(databaseUrl);
@@ -755,7 +800,20 @@ export async function createProductionContext(databaseUrl?: string, useDemoData 
   }
   return {
     store,
-    persist: (change) => repository.persistChange(store, change)
+    persist: (change) => repository.persistChange(store, change),
+    heartRate: repository
+  };
+}
+
+function mapHeartRateDetail(summary: any, points: any[]): WorkoutHeartRateDetail {
+  return {
+    workoutId: summary.workout_id,
+    averageBPM: Number(summary.average_bpm),
+    minimumBPM: Number(summary.minimum_bpm),
+    maximumBPM: Number(summary.maximum_bpm),
+    sampleCount: Number(summary.sample_count),
+    updatedAt: dateString(summary.updated_at),
+    points: points.map((point) => ({ recordedAt: dateString(point.recorded_at), bpm: Number(point.bpm), sampleCount: Number(point.sample_count) }))
   };
 }
 

@@ -107,6 +107,22 @@ export interface WorkoutSummary {
   updatedAt: string;
 }
 
+export interface WorkoutHeartRatePoint {
+  recordedAt: string;
+  bpm: number;
+  sampleCount: number;
+}
+
+export interface WorkoutHeartRateDetail {
+  workoutId: ID;
+  averageBPM: number;
+  minimumBPM: number;
+  maximumBPM: number;
+  sampleCount: number;
+  points: WorkoutHeartRatePoint[];
+  updatedAt: string;
+}
+
 export interface PersonalRecordAttempt {
   workout: WorkoutSummary;
   elapsedSeconds: number;
