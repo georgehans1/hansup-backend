@@ -78,6 +78,8 @@ import { sendApnsPush } from "./apns.js";
 import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
 import type { PersistenceChange } from "./postgres.js";
+import type { PostgresRepository } from "./postgres.js";
+import { generateGeminiPlan } from "./gemini.js";
 import { error as logError, info, warn } from "./logger.js";
 
 const demoUserId = "u_ama";
@@ -87,7 +89,8 @@ export function createServer(
   config: ProductionConfig = productionConfig(),
   persistChange: (change: PersistenceChange) => Promise<void> = async () => {},
   heartRate: WorkoutHeartRateRepository = new InMemoryWorkoutHeartRateRepository(),
-  splits: WorkoutSplitRepository = new InMemoryWorkoutSplitRepository()
+  splits: WorkoutSplitRepository = new InMemoryWorkoutSplitRepository(),
+  performanceGoals?: PostgresRepository
 ) {
   const requestWindows = new Map<string, { startedAt: number; count: number }>();
   let requestSequence = 0;
@@ -192,6 +195,68 @@ export function createServer(
         await onChange({ kind: "settings", userId });
         await onChange({ kind: "derived", userId });
         return json(res, 200, result);
+      }
+
+      if (url.pathname.startsWith("/performance-goals") && !performanceGoals) {
+        return json(res, 503, { error: "Performance coaching requires PostgreSQL" });
+      }
+
+      if (req.method === "GET" && url.pathname === "/performance-goals") {
+        const goals = await performanceGoals!.performanceGoalsFor(userId);
+        const refreshed = await Promise.all(goals.map((item) =>
+          item.goal.status === "active" ? performanceGoals!.refreshPerformanceGoalAnalysis(userId, item.goal.id) : item
+        ));
+        return json(res, 200, refreshed);
+      }
+
+      if (req.method === "POST" && url.pathname === "/performance-goals") {
+        const payload = await body<{
+          distanceMeters: number; targetSeconds: number; targetDate: string;
+          trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string;
+        }>(req);
+        const result = await performanceGoals!.createPerformanceGoal(userId, payload);
+        return json(res, 201, result);
+      }
+
+      const performanceGoalRoute = url.pathname.match(/^\/performance-goals\/([^/]+)$/);
+      const performanceAnalysisRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/analysis$/);
+      const performanceGenerateRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/generate$/);
+      const performanceCoachingDataRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/coaching-data$/);
+      if (req.method === "GET" && performanceGoalRoute) {
+        const result = await performanceGoals!.performanceGoalFor(userId, performanceGoalRoute[1]);
+        return result ? json(res, 200, result) : json(res, 404, { error: "Performance goal not found" });
+      }
+      if (req.method === "PATCH" && performanceGoalRoute) {
+        const payload = await body<{ status: string }>(req);
+        return json(res, 200, await performanceGoals!.updatePerformanceGoalStatus(userId, performanceGoalRoute[1], payload.status));
+      }
+      if (req.method === "POST" && performanceAnalysisRoute) {
+        return json(res, 200, await performanceGoals!.refreshPerformanceGoalAnalysis(userId, performanceAnalysisRoute[1]));
+      }
+      if (req.method === "POST" && performanceGenerateRoute) {
+        const refreshed = await performanceGoals!.refreshPerformanceGoalAnalysis(userId, performanceGenerateRoute[1]);
+        if (refreshed.goal.status !== "active") return json(res, 409, { error: "Only active goals can generate plans" });
+        const model = config.geminiModel ?? "gemini-2.5-flash";
+        const generationId = await performanceGoals!.beginCoachGeneration(userId, refreshed.goal.id, model, "userRequested");
+        try {
+          const draft = await generateGeminiPlan(config, refreshed);
+          const plan = await performanceGoals!.saveTrainingPlan(refreshed.goal.id, model, draft);
+          await performanceGoals!.finishCoachGeneration(generationId);
+          info("coach_plan_generated", { requestId, userId, goalId: refreshed.goal.id, planVersion: plan.version });
+          return json(res, 200, { goal: refreshed.goal, plan, milestones: refreshed.milestones });
+        } catch (failure) {
+          await performanceGoals!.finishCoachGeneration(generationId, failure instanceof Error ? failure.message : "Generation failed");
+          throw failure;
+        }
+      }
+      if (req.method === "DELETE" && performanceCoachingDataRoute) {
+        await performanceGoals!.deleteCoachingData(userId, performanceCoachingDataRoute[1]);
+        return json(res, 200, { ok: true });
+      }
+
+      const trainingSessionRoute = url.pathname.match(/^\/training-sessions\/([^/]+)$/);
+      if (req.method === "PATCH" && trainingSessionRoute) {
+        return json(res, 200, await performanceGoals!.updateTrainingSession(userId, trainingSessionRoute[1], await body(req)));
       }
 
       if (req.method === "GET" && url.pathname === "/users/search") {

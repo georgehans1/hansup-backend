@@ -2,6 +2,8 @@ export type ID = string;
 
 export type ActivityKind = "steps" | "distance" | "walking" | "running" | "strengthTraining" | "activeMinutes" | "calories";
 export type GoalCadence = "daily" | "weekly";
+export type PerformanceGoalStatus = "active" | "completed" | "abandoned" | "archived";
+export type TrainingSessionStatus = "scheduled" | "completed" | "skipped";
 export type ChallengeStatus = "inviting" | "active" | "completed";
 export type ChallengeTemplate =
   | "weekly_steps"
@@ -107,6 +109,81 @@ export interface WorkoutSummary {
   source: "healthkit";
   trustLevel: "verified" | "review";
   updatedAt: string;
+}
+
+export interface PerformanceGoalAnalysis {
+  currentBestSeconds?: number;
+  targetSeconds: number;
+  requiredPaceSecondsPerKm: number;
+  currentPaceSecondsPerKm?: number;
+  timeGapSeconds?: number;
+  recentWeeklyDistanceMeters: number;
+  recentRuns: number;
+  improvementSeconds?: number;
+  splitVariationSeconds?: number;
+  lateRunSlowdownSeconds?: number;
+  averageHeartRateBPM?: number;
+  feasibility: "insufficientData" | "onTrack" | "ambitious" | "stretch";
+  qualifyingWorkoutId?: ID;
+  generatedAt: string;
+}
+
+export interface PerformanceGoal {
+  id: ID;
+  userId: ID;
+  distanceMeters: number;
+  targetSeconds: number;
+  targetDate: string;
+  trainingDaysPerWeek: number;
+  preferredLongRunDay: number;
+  status: PerformanceGoalStatus;
+  consentVersion: string;
+  analysis: PerformanceGoalAnalysis;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TrainingSession {
+  id: ID;
+  planId: ID;
+  scheduledDate: string;
+  type: string;
+  title: string;
+  purpose: string;
+  distanceMeters?: number;
+  durationSeconds?: number;
+  effort: string;
+  status: TrainingSessionStatus;
+  linkedWorkoutId?: ID;
+}
+
+export interface TrainingPlan {
+  id: ID;
+  performanceGoalId: ID;
+  version: number;
+  model: string;
+  summary: string;
+  gapExplanation: string;
+  recoveryGuidance: string;
+  caution: string;
+  generatedAt: string;
+  sessions: TrainingSession[];
+}
+
+export interface PerformanceGoalDetail {
+  goal: PerformanceGoal;
+  plan?: TrainingPlan;
+  milestones: PerformanceGoalMilestone[];
+}
+
+export interface PerformanceGoalMilestone {
+  id: ID;
+  performanceGoalId: ID;
+  sequence: number;
+  targetSeconds: number;
+  targetDate: string;
+  status: "pending" | "completed" | "missed";
+  completedWorkoutId?: ID;
 }
 
 export interface WorkoutHeartRatePoint {
