@@ -16,6 +16,7 @@ import {
   GoalCadence,
   ID,
   LeaderboardPeriod,
+  LeaderboardMetric,
   Message,
   PersonalRecordAttempt,
   PersonalRecordLab,
@@ -29,6 +30,7 @@ import {
   UserBadge,
   UserSettings,
   WorkoutSummary,
+  WorkoutSplitsDetail,
   calculateStreak,
   addLocalDays,
   detectTrustLevel,
@@ -651,15 +653,18 @@ export function deleteGoal(store: AppStore, userId: ID, goalId: ID) {
   return { ok: true };
 }
 
-export function friendLeaderboard(store: AppStore, userId: ID, period: LeaderboardPeriod): ActivityComparison {
+export function friendLeaderboard(store: AppStore, userId: ID, period: LeaderboardPeriod, metric: LeaderboardMetric = "steps"): ActivityComparison {
   return {
     period,
+    metric,
     rows: leaderboardRows({
       userIds: [userId, ...friendsFor(store, userId).map((friend) => friend.id)],
       summaries: store.summaries,
       goals: store.goals,
       streaks: store.streaks,
+      workouts: store.workouts,
       period,
+      metric,
       now: currentDateForUser(store, userId)
     })
   };
@@ -775,16 +780,19 @@ export function reactToMessage(store: AppStore, userId: ID, messageId: ID, kind:
   return message.reactions;
 }
 
-export function conversationComparison(store: AppStore, userId: ID, conversationId: ID, period: LeaderboardPeriod): ActivityComparison {
+export function conversationComparison(store: AppStore, userId: ID, conversationId: ID, period: LeaderboardPeriod, metric: LeaderboardMetric = "steps"): ActivityComparison {
   requireMember(store, userId, conversationId);
   return {
     period,
+    metric,
     rows: leaderboardRows({
       userIds: store.conversationMembers.filter((item) => item.conversationId === conversationId).map((item) => item.userId),
       summaries: store.summaries,
       goals: store.goals,
       streaks: store.streaks,
+      workouts: store.workouts,
       period,
+      metric,
       now: currentDateForUser(store, userId)
     })
   };
@@ -839,23 +847,31 @@ export function challengeCareerStats(store: AppStore, userId: ID): ChallengeCare
     refreshChallenge(store, challenge);
   }
   const entered = store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId && item.accepted));
+  const active = entered.filter((challenge) => challenge.status === "active").length;
+  const pendingInvites = store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId && !item.accepted && !item.respondedAt)).length;
   const completed = entered.filter((challenge) => challenge.status === "completed").sort((a, b) => a.endsOn.localeCompare(b.endsOn));
-  const outcomes = completed.map((challenge) => challengeOutcome(challenge, userId));
+  const outcomes = completed.map((challenge) => challengeOutcomeKind(challenge, userId));
+  const isWin = (outcome: ChallengeOutcomeKind) => outcome === "win" || outcome === "teamWin";
   let currentWinStreak = 0;
-  for (const won of [...outcomes].reverse()) {
-    if (!won) break;
+  for (const outcome of [...outcomes].reverse()) {
+    if (!isWin(outcome)) break;
     currentWinStreak += 1;
   }
   let bestWinStreak = 0;
   let run = 0;
-  for (const won of outcomes) {
-    run = won ? run + 1 : 0;
+  for (const outcome of outcomes) {
+    run = isWin(outcome) ? run + 1 : 0;
     bestWinStreak = Math.max(bestWinStreak, run);
   }
   const kindCounts = new Map<ActivityKind, number>();
   for (const challenge of entered) kindCounts.set(challenge.kind, (kindCounts.get(challenge.kind) ?? 0) + 1);
   const favoriteKind = [...kindCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
-  const wins = outcomes.filter(Boolean).length;
+  const wins = outcomes.filter(isWin).length;
+  const losses = outcomes.filter((outcome) => outcome === "loss" || outcome === "teamLoss").length;
+  const draws = outcomes.filter((outcome) => outcome === "draw" || outcome === "teamDraw").length;
+  const targetSuccesses = outcomes.filter((outcome) => outcome === "targetSuccess").length;
+  const cooperativeSuccesses = outcomes.filter((outcome) => outcome === "cooperativeSuccess").length;
+  const teamWins = outcomes.filter((outcome) => outcome === "teamWin").length;
   const podiumFinishes = completed.filter((challenge) => {
     if (challenge.mode === "cooperative" || challenge.mode === "team") return challengeOutcome(challenge, userId);
     const ranked = [...challenge.participants].filter((item) => item.accepted).sort((a, b) => b.score - a.score);
@@ -866,10 +882,17 @@ export function challengeCareerStats(store: AppStore, userId: ID): ChallengeCare
     entered: entered.length,
     completed: completed.length,
     wins,
+    losses,
+    draws,
+    active,
+    pendingInvites,
+    targetSuccesses,
+    cooperativeSuccesses,
+    teamWins,
     podiumFinishes,
     currentWinStreak,
     bestWinStreak,
-    winRate: completed.length ? Math.round(wins / completed.length * 100) : 0,
+    winRate: wins + losses + draws ? Math.round(wins / (wins + losses + draws) * 100) : 0,
     favoriteKind
   };
 }
@@ -1049,9 +1072,9 @@ export function profileRecords(store: AppStore, userId: ID) {
   const workouts = store.workouts.filter((item) => item.userId === userId);
   const running = workouts.filter((item) => item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
   const fastest = (meters: number) => {
-    const eligible = running.filter((item) => item.distanceMeters >= meters);
+    const eligible = running.filter((item) => isStandaloneDistance(item.distanceMeters, meters));
     if (eligible.length === 0) return undefined;
-    return Math.round(Math.min(...eligible.map((item) => item.durationSeconds * meters / item.distanceMeters)));
+    return Math.round(Math.min(...eligible.map((item) => item.durationSeconds)));
   };
   const longestWalk = Math.max(0, ...workouts.filter((item) => item.activityType === "walking").map((item) => item.distanceMeters));
   const longestActivity = Math.max(0, ...workouts.map((item) => item.durationSeconds));
@@ -1092,7 +1115,7 @@ export function lifetimePersonalBests(store: AppStore, userId: ID) {
   const summaries = store.summaries.filter((item) => item.userId === userId);
   const workouts = store.workouts.filter((item) => item.userId === userId);
   const runs = workouts.filter((item) => item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
-  const fastest = (meters: number) => runs.filter((item) => item.distanceMeters >= meters).map((item) => ({ workout: item, elapsedSeconds: Math.round(item.durationSeconds * meters / item.distanceMeters), paceSecondsPerKm: Math.round(item.durationSeconds / (item.distanceMeters / 1000)) })).sort((a, b) => a.elapsedSeconds - b.elapsedSeconds).slice(0, 20);
+  const fastest = (meters: number) => runs.filter((item) => isStandaloneDistance(item.distanceMeters, meters)).map((item) => ({ workout: item, elapsedSeconds: Math.round(item.durationSeconds), paceSecondsPerKm: Math.round(item.durationSeconds / (item.distanceMeters / 1000)) })).sort((a, b) => a.elapsedSeconds - b.elapsedSeconds).slice(0, 20);
   return {
     fastest1K: fastest(1000), fastest5K: fastest(5000), fastest10K: fastest(10000), fastestHalfMarathon: fastest(21097.5),
     highestStepDays: summaries.filter((item) => item.steps > 0).sort((a, b) => b.steps - a.steps).slice(0, 20),
@@ -1103,6 +1126,11 @@ export function lifetimePersonalBests(store: AppStore, userId: ID) {
   };
 }
 
+function isStandaloneDistance(recordedMeters: number, targetMeters: number): boolean {
+  const tolerance = Math.min(Math.max(75, targetMeters * 0.03), 750);
+  return Math.abs(recordedMeters - targetMeters) <= tolerance;
+}
+
 export function personalBestsFor(store: AppStore, viewerId: ID, userId: ID) {
   const status = friendshipStatus(store, viewerId, userId);
   const privacy = store.settings.find((item) => item.userId === userId);
@@ -1110,7 +1138,7 @@ export function personalBestsFor(store: AppStore, viewerId: ID, userId: ID) {
   return lifetimePersonalBests(store, userId);
 }
 
-export function personalRecordLabFor(store: AppStore, viewerId: ID, userId: ID): PersonalRecordLab {
+export function personalRecordLabFor(store: AppStore, viewerId: ID, userId: ID, splitDetails: WorkoutSplitsDetail[] = []): PersonalRecordLab {
   const status = friendshipStatus(store, viewerId, userId);
   const privacy = store.settings.find((item) => item.userId === userId);
   if (viewerId !== userId && (status !== "accepted" || privacy?.hideActivityFromFriends || privacy?.hideExactNumbers)) {
@@ -1120,32 +1148,37 @@ export function personalRecordLabFor(store: AppStore, viewerId: ID, userId: ID):
   const runs = store.workouts
     .filter((item) => item.userId === userId && item.activityType === "running" && item.distanceMeters > 0 && item.durationSeconds > 0);
 
-  const distances = [1_000, 5_000, 10_000, 21_097.5].map((distanceMeters) => {
+  const buildRecord = (
+    key: string,
+    distanceMeters: number,
+    recordType: "standalone" | "split",
+    sourceAttempts: Array<Omit<PersonalRecordAttempt, "isPersonalBest" | "isCurrentPersonalBest">>
+  ) => {
     let recordSeconds = Number.POSITIVE_INFINITY;
-    const chronological = runs
-      .filter((item) => item.distanceMeters >= distanceMeters)
-      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
-      .map((workout): PersonalRecordAttempt => {
-        const elapsedSeconds = Math.round(workout.durationSeconds * distanceMeters / workout.distanceMeters);
-        const isPersonalBest = elapsedSeconds < recordSeconds;
-        recordSeconds = Math.min(recordSeconds, elapsedSeconds);
-        return {
-          workout,
-          elapsedSeconds,
-          paceSecondsPerKm: Math.round(workout.durationSeconds / (workout.distanceMeters / 1_000)),
-          isPersonalBest
-        };
+    const chronological = sourceAttempts
+      .sort((left, right) => left.workout.startedAt.localeCompare(right.workout.startedAt))
+      .map((attempt): PersonalRecordAttempt => {
+        const isPersonalBest = attempt.elapsedSeconds < recordSeconds;
+        recordSeconds = Math.min(recordSeconds, attempt.elapsedSeconds);
+        return { ...attempt, isPersonalBest, isCurrentPersonalBest: false };
       });
 
-    const ranked = [...chronological].sort((left, right) => left.elapsedSeconds - right.elapsedSeconds);
-    const newest = [...chronological].sort((left, right) => right.workout.startedAt.localeCompare(left.workout.startedAt));
+    const bestSeconds = Math.min(Number.POSITIVE_INFINITY, ...chronological.map((attempt) => attempt.elapsedSeconds));
+    const marked = chronological.map((attempt) => ({
+      ...attempt,
+      isCurrentPersonalBest: attempt.elapsedSeconds === bestSeconds
+    }));
+    const ranked = [...marked].sort((left, right) => left.elapsedSeconds - right.elapsedSeconds || right.workout.startedAt.localeCompare(left.workout.startedAt));
+    const newest = [...marked].sort((left, right) => right.workout.startedAt.localeCompare(left.workout.startedAt));
     const recent = newest.slice(0, 5);
     const best = ranked[0];
     const latest = newest[0];
-    const first = chronological[0];
+    const first = marked[0];
     return {
+      key,
       distanceMeters,
-      totalAttempts: chronological.length,
+      recordType,
+      totalAttempts: marked.length,
       best,
       latest,
       improvementSeconds: best && first ? Math.max(first.elapsedSeconds - best.elapsedSeconds, 0) : 0,
@@ -1153,11 +1186,47 @@ export function personalRecordLabFor(store: AppStore, viewerId: ID, userId: ID):
       recentAveragePaceSecondsPerKm: recent.length
         ? Math.round(recent.reduce((sum, item) => sum + item.paceSecondsPerKm, 0) / recent.length)
         : 0,
-      attempts: newest.slice(0, 60)
+      attempts: newest.slice(0, 100)
     };
+  };
+
+  const standaloneDistances = [1_000, 2_000, 3_000, 4_000, 5_000, 10_000, 15_000, 21_097.5, 42_195];
+  const standalone = standaloneDistances.map((distanceMeters) => {
+    const tolerance = Math.min(Math.max(75, distanceMeters * 0.03), 750);
+    const attempts = runs
+      .filter((workout) => Math.abs(workout.distanceMeters - distanceMeters) <= tolerance)
+      .map((workout) => ({
+        workout,
+        elapsedSeconds: Math.round(workout.durationSeconds),
+        paceSecondsPerKm: Math.round(workout.durationSeconds / (workout.distanceMeters / 1_000)),
+        qualification: "standalone" as const
+      }));
+    return buildRecord(`standalone:${distanceMeters}`, distanceMeters, "standalone", attempts);
   });
 
-  return { userId, generatedAt: new Date().toISOString(), distances };
+  const runsById = new Map(runs.map((workout) => [workout.id, workout]));
+  const splitAttempts = splitDetails.flatMap((detail) => {
+    const workout = runsById.get(detail.workoutId);
+    if (!workout) return [];
+    const bestSplit = detail.splits
+      .filter((split) => split.unit === "kilometer" && !split.isPartial && split.distanceMeters >= 950)
+      .sort((left, right) => left.durationSeconds - right.durationSeconds)[0];
+    if (!bestSplit) return [];
+    return [{
+      workout,
+      elapsedSeconds: Math.round(bestSplit.durationSeconds),
+      paceSecondsPerKm: Math.round(bestSplit.paceSecondsPerKm),
+      qualification: "measuredSplit" as const,
+      splitIndex: bestSplit.index
+    }];
+  });
+  const fastestKilometerSplit = buildRecord("split:1000", 1_000, "split", splitAttempts);
+
+  return {
+    userId,
+    generatedAt: new Date().toISOString(),
+    distances: [...standalone, fastestKilometerSplit]
+  };
 }
 
 export function userSummaries(store: AppStore, viewerId: ID, ids: ID[]) {
@@ -1469,21 +1538,34 @@ function addMilestoneMessages(store: AppStore, userId: ID, milestone: string, mi
   }
 }
 
-function challengeOutcome(challenge: Challenge, userId: ID): boolean {
+type ChallengeOutcomeKind = "win" | "loss" | "draw" | "teamWin" | "teamLoss" | "teamDraw" | "targetSuccess" | "targetMiss" | "cooperativeSuccess" | "cooperativeFailure";
+
+function challengeOutcomeKind(challenge: Challenge, userId: ID): ChallengeOutcomeKind {
   const accepted = challenge.participants.filter((item) => item.accepted);
   const participant = accepted.find((item) => item.userId === userId);
-  if (!participant) return false;
+  if (!participant) return "loss";
   if (challenge.mode === "cooperative") {
-    return Boolean(challenge.target && accepted.reduce((sum, item) => sum + item.score, 0) >= challenge.target);
+    return challenge.target && accepted.reduce((sum, item) => sum + item.score, 0) >= challenge.target
+      ? "cooperativeSuccess"
+      : "cooperativeFailure";
   }
   if (challenge.mode === "team") {
     const teamTotals = new Map<string, number>();
     for (const item of accepted) teamTotals.set(item.teamId ?? "", (teamTotals.get(item.teamId ?? "") ?? 0) + item.score);
     const best = Math.max(0, ...teamTotals.values());
-    return (teamTotals.get(participant.teamId ?? "") ?? 0) === best && best > 0;
+    const participantScore = teamTotals.get(participant.teamId ?? "") ?? 0;
+    const leaders = [...teamTotals.values()].filter((score) => score === best).length;
+    if (participantScore !== best || best <= 0) return "teamLoss";
+    return leaders > 1 ? "teamDraw" : "teamWin";
   }
+  if (challenge.mode === "target") return challenge.target && participant.score >= challenge.target ? "targetSuccess" : "targetMiss";
   const best = Math.max(0, ...accepted.map((item) => item.score));
-  return participant.score === best && best > 0;
+  if (participant.score !== best || best <= 0) return "loss";
+  return accepted.filter((item) => item.score === best).length > 1 ? "draw" : "win";
+}
+
+function challengeOutcome(challenge: Challenge, userId: ID): boolean {
+  return ["win", "teamWin", "targetSuccess", "cooperativeSuccess"].includes(challengeOutcomeKind(challenge, userId));
 }
 
 function goalsForStreak(store: AppStore, userId: ID): Goal[] {

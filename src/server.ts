@@ -69,7 +69,7 @@ import {
   workoutForExactViewer,
   summaryForViewer
 } from "./store.js";
-import { LeaderboardPeriod } from "./domain.js";
+import { LeaderboardMetric, LeaderboardPeriod } from "./domain.js";
 import type { WorkoutHeartRatePoint } from "./domain.js";
 import { InMemoryWorkoutHeartRateRepository, WorkoutHeartRateRepository } from "./heart-rate.js";
 import type { WorkoutSplit } from "./domain.js";
@@ -293,12 +293,17 @@ export function createServer(
         return json(res, 200, lifetimePersonalBests(store, userId));
       }
       if (req.method === "GET" && url.pathname === "/me/record-lab") {
-        return json(res, 200, personalRecordLabFor(store, userId, userId));
+        const details = await splits.splitsForWorkoutIds(store.workouts.filter((item) => item.userId === userId && item.activityType === "running").map((item) => item.id));
+        return json(res, 200, personalRecordLabFor(store, userId, userId, details));
       }
       const userPersonalBests = url.pathname.match(/^\/users\/([^/]+)\/personal-bests$/);
       if (req.method === "GET" && userPersonalBests) return json(res, 200, personalBestsFor(store, userId, userPersonalBests[1]));
       const userRecordLab = url.pathname.match(/^\/users\/([^/]+)\/record-lab$/);
-      if (req.method === "GET" && userRecordLab) return json(res, 200, personalRecordLabFor(store, userId, userRecordLab[1]));
+      if (req.method === "GET" && userRecordLab) {
+        const targetId = userRecordLab[1];
+        const details = await splits.splitsForWorkoutIds(store.workouts.filter((item) => item.userId === targetId && item.activityType === "running").map((item) => item.id));
+        return json(res, 200, personalRecordLabFor(store, userId, targetId, details));
+      }
       if (req.method === "POST" && url.pathname === "/users/summaries") {
         const payload = await body<{ ids: string[] }>(req);
         return json(res, 200, userSummaries(store, userId, payload.ids ?? []));
@@ -391,7 +396,7 @@ export function createServer(
       }
 
       if (req.method === "GET" && url.pathname === "/leaderboards/friends") {
-        return json(res, 200, friendLeaderboard(store, userId, period(url.searchParams.get("period"))));
+        return json(res, 200, friendLeaderboard(store, userId, period(url.searchParams.get("period")), leaderboardMetric(url.searchParams.get("metric"))));
       }
 
       if (req.method === "POST" && url.pathname === "/goals") {
@@ -480,7 +485,7 @@ export function createServer(
 
       const conversationCompare = url.pathname.match(/^\/conversations\/([^/]+)\/comparison$/);
       if (req.method === "GET" && conversationCompare) {
-        return json(res, 200, conversationComparison(store, userId, conversationCompare[1], period(url.searchParams.get("period"))));
+        return json(res, 200, conversationComparison(store, userId, conversationCompare[1], period(url.searchParams.get("period")), leaderboardMetric(url.searchParams.get("metric"))));
       }
 
       const messageReaction = url.pathname.match(/^\/messages\/([^/]+)\/reactions$/);
@@ -629,6 +634,12 @@ async function body<T>(req: any): Promise<T> {
 
 function period(value: string | null): LeaderboardPeriod {
   return value === "today" || value === "week" || value === "month" || value === "all" ? value : "week";
+}
+
+function leaderboardMetric(value: string | null): LeaderboardMetric {
+  return value === "distance" || value === "walking" || value === "running" || value === "activeMinutes" || value === "calories" || value === "strengthSessions"
+    ? value
+    : "steps";
 }
 
 function numberParam(url: URL, name: string, fallback: number): number {
