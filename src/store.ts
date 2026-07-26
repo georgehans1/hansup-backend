@@ -847,11 +847,12 @@ export function challengeCareerStats(store: AppStore, userId: ID): ChallengeCare
     refreshChallenge(store, challenge);
   }
   const entered = store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId && item.accepted));
-  const active = entered.filter((challenge) => challenge.status === "active").length;
+  const active = entered.filter((challenge) => challenge.status !== "completed").length;
   const pendingInvites = store.challenges.filter((challenge) => challenge.participants.some((item) => item.userId === userId && !item.accepted && !item.respondedAt)).length;
   const completed = entered.filter((challenge) => challenge.status === "completed").sort((a, b) => a.endsOn.localeCompare(b.endsOn));
   const outcomes = completed.map((challenge) => challengeOutcomeKind(challenge, userId));
-  const isWin = (outcome: ChallengeOutcomeKind) => outcome === "win" || outcome === "teamWin";
+  const isWin = (outcome: ChallengeOutcomeKind) => ["win", "teamWin", "targetSuccess", "cooperativeSuccess"].includes(outcome);
+  const isLoss = (outcome: ChallengeOutcomeKind) => ["loss", "teamLoss", "targetMiss", "cooperativeFailure"].includes(outcome);
   let currentWinStreak = 0;
   for (const outcome of [...outcomes].reverse()) {
     if (!isWin(outcome)) break;
@@ -867,7 +868,7 @@ export function challengeCareerStats(store: AppStore, userId: ID): ChallengeCare
   for (const challenge of entered) kindCounts.set(challenge.kind, (kindCounts.get(challenge.kind) ?? 0) + 1);
   const favoriteKind = [...kindCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
   const wins = outcomes.filter(isWin).length;
-  const losses = outcomes.filter((outcome) => outcome === "loss" || outcome === "teamLoss").length;
+  const losses = outcomes.filter(isLoss).length;
   const draws = outcomes.filter((outcome) => outcome === "draw" || outcome === "teamDraw").length;
   const targetSuccesses = outcomes.filter((outcome) => outcome === "targetSuccess").length;
   const cooperativeSuccesses = outcomes.filter((outcome) => outcome === "cooperativeSuccess").length;
