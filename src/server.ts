@@ -212,7 +212,7 @@ export function createServer(
       if (req.method === "POST" && url.pathname === "/performance-goals") {
         const payload = await body<{
           distanceMeters: number; targetSeconds: number; targetDate: string;
-          trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string;
+          trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string; baselineWorkoutId?: string;
         }>(req);
         const result = await performanceGoals!.createPerformanceGoal(userId, payload);
         return json(res, 201, result);

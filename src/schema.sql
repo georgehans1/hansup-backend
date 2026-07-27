@@ -158,6 +158,8 @@ CREATE TABLE performance_goals (
   preferred_long_run_day integer NOT NULL,
   status text NOT NULL CHECK (status IN ('active', 'completed', 'abandoned', 'archived')),
   consent_version text NOT NULL,
+  baseline_seconds integer,
+  baseline_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL,
   analysis jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()

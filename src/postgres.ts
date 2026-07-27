@@ -466,24 +466,43 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   async createPerformanceGoal(userId: string, input: {
     distanceMeters: number; targetSeconds: number; targetDate: string;
-    trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string;
+    trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string; baselineWorkoutId?: string;
   }): Promise<PerformanceGoalDetail> {
     if (![1000, 2000, 3000, 4000, 5000, 10000, 21097.5].includes(input.distanceMeters)) throw new Error("Unsupported performance distance");
     if (input.targetSeconds <= 0 || input.trainingDaysPerWeek < 2 || input.trainingDaysPerWeek > 7) throw new Error("Invalid performance goal");
     if ((await this.query("select 1 from performance_goals where user_id = $1 and status = 'active'", [userId])).rows.length) throw new Error("Complete or archive your active performance goal first");
     const id = generatedId("pg");
-    const analysis = await this.performanceAnalysis(userId, input.distanceMeters, input.targetSeconds);
+    let analysis = await this.performanceAnalysis(userId, input.distanceMeters, input.targetSeconds);
+    let baselineSeconds: number | undefined;
+    if (input.baselineWorkoutId) {
+      const tolerance = Math.max(75, input.distanceMeters * 0.015);
+      const selected = (await this.query(
+        `select * from workout_summaries where id = $1 and user_id = $2 and activity_type = 'running'
+         and abs(distance_meters - $3) <= $4`,
+        [input.baselineWorkoutId, userId, input.distanceMeters, tolerance]
+      )).rows[0];
+      if (!selected) throw new Error("Selected baseline run does not qualify for this distance");
+      baselineSeconds = Math.round(Number(selected.duration_seconds));
+      analysis = {
+        ...analysis,
+        currentBestSeconds: baselineSeconds,
+        currentPaceSecondsPerKm: Math.round(baselineSeconds / (input.distanceMeters / 1000)),
+        timeGapSeconds: baselineSeconds - input.targetSeconds,
+        qualifyingWorkoutId: selected.id,
+        feasibility: performanceFeasibility(baselineSeconds, input.targetSeconds)
+      };
+    }
     await this.query(
-      `insert into performance_goals (id,user_id,distance_meters,target_seconds,target_date,training_days_per_week,preferred_long_run_day,status,consent_version,analysis)
-       values ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9)`,
-      [id, userId, input.distanceMeters, input.targetSeconds, input.targetDate, input.trainingDaysPerWeek, input.preferredLongRunDay, input.consentVersion, JSON.stringify(analysis)]
+      `insert into performance_goals (id,user_id,distance_meters,target_seconds,target_date,training_days_per_week,preferred_long_run_day,status,consent_version,baseline_seconds,baseline_workout_id,analysis)
+       values ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11)`,
+      [id, userId, input.distanceMeters, input.targetSeconds, input.targetDate, input.trainingDaysPerWeek, input.preferredLongRunDay, input.consentVersion, baselineSeconds ?? null, input.baselineWorkoutId ?? null, JSON.stringify(analysis)]
     );
-    const baselineSeconds = analysis.currentBestSeconds ?? Math.round(input.targetSeconds * 1.2);
+    const milestoneBaselineSeconds = baselineSeconds ?? Math.round(input.targetSeconds * 1.2);
     const start = new Date();
     const end = new Date(`${input.targetDate}T12:00:00Z`);
     for (let sequence = 1; sequence <= 3; sequence++) {
       const fraction = sequence / 3;
-      const milestoneSeconds = Math.round(baselineSeconds - (baselineSeconds - input.targetSeconds) * fraction);
+      const milestoneSeconds = Math.round(milestoneBaselineSeconds - (milestoneBaselineSeconds - input.targetSeconds) * fraction);
       const milestoneDate = new Date(start.getTime() + (end.getTime() - start.getTime()) * fraction).toISOString().slice(0, 10);
       await this.query(
         "insert into performance_goal_milestones (id,performance_goal_id,sequence,target_seconds,target_date) values ($1,$2,$3,$4,$5)",
@@ -506,7 +525,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   async refreshPerformanceGoalAnalysis(userId: string, goalId: string): Promise<PerformanceGoalDetail> {
     const detail = await this.performanceGoalFor(userId, goalId);
     if (!detail) throw new Error("Performance goal not found");
-    const analysis = await this.performanceAnalysis(userId, detail.goal.distanceMeters, detail.goal.targetSeconds);
+    const analysis = await this.performanceAnalysis(userId, detail.goal.distanceMeters, detail.goal.targetSeconds, detail.goal.createdAt, detail.goal.baselineSeconds, detail.goal.baselineWorkoutId);
     if (analysis.currentBestSeconds != null) {
       await this.query(
         `update performance_goal_milestones set status = 'completed', completed_workout_id = $1
@@ -584,12 +603,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     );
   }
 
-  private async performanceAnalysis(userId: string, distanceMeters: number, targetSeconds: number): Promise<PerformanceGoalAnalysis> {
+  private async performanceAnalysis(userId: string, distanceMeters: number, targetSeconds: number, since?: string, baselineSeconds?: number, baselineWorkoutId?: string): Promise<PerformanceGoalAnalysis> {
     const tolerance = Math.max(75, distanceMeters * 0.015);
     const qualifying = (await this.query(
       `select * from workout_summaries where user_id = $1 and activity_type = 'running'
-       and abs(distance_meters - $2) <= $3 order by duration_seconds asc`,
-      [userId, distanceMeters, tolerance]
+       and abs(distance_meters - $2) <= $3 and ($4::timestamptz is null or started_at >= $4::timestamptz)
+       order by duration_seconds asc`,
+      [userId, distanceMeters, tolerance, since ?? null]
     )).rows;
     const recent = (await this.query(
       `select duration_seconds,distance_meters from workout_summaries where user_id = $1 and activity_type = 'running'
@@ -598,7 +618,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     )).rows;
     const best = qualifying[0];
     const latest = qualifying.slice().sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0];
-    const currentBestSeconds = best ? Math.round(Number(best.duration_seconds)) : undefined;
+    const measuredBest = best ? Math.round(Number(best.duration_seconds)) : undefined;
+    const currentBestSeconds = baselineSeconds == null ? measuredBest : measuredBest == null ? baselineSeconds : Math.min(baselineSeconds, measuredBest);
     const gap = currentBestSeconds == null ? undefined : currentBestSeconds - targetSeconds;
     const improvement = best && latest ? Math.max(0, Math.round(Number(latest.duration_seconds) - Number(best.duration_seconds))) : undefined;
     const ratio = gap == null ? undefined : gap / targetSeconds;
@@ -627,7 +648,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       lateRunSlowdownSeconds: firstHalf == null || secondHalf == null ? undefined : Math.round(secondHalf - firstHalf),
       averageHeartRateBPM: heartRate ? Math.round(Number(heartRate.average_bpm)) : undefined,
       feasibility: ratio == null ? "insufficientData" : ratio <= 0 ? "onTrack" : ratio <= 0.08 ? "onTrack" : ratio <= 0.2 ? "ambitious" : "stretch",
-      qualifyingWorkoutId: best?.id,
+      qualifyingWorkoutId: measuredBest != null && measuredBest <= (baselineSeconds ?? Number.MAX_SAFE_INTEGER) ? best?.id : baselineWorkoutId,
       generatedAt: new Date().toISOString()
     };
   }
@@ -648,6 +669,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       id: row.id, userId: row.user_id, distanceMeters: Number(row.distance_meters), targetSeconds: Number(row.target_seconds),
       targetDate: dateString(row.target_date).slice(0, 10), trainingDaysPerWeek: Number(row.training_days_per_week),
       preferredLongRunDay: Number(row.preferred_long_run_day), status: row.status, consentVersion: row.consent_version,
+      baselineSeconds: row.baseline_seconds == null ? undefined : Number(row.baseline_seconds),
+      baselineWorkoutId: row.baseline_workout_id ?? undefined,
       analysis: row.analysis as PerformanceGoalAnalysis, createdAt: dateString(row.created_at), updatedAt: dateString(row.updated_at)
     };
     const milestones = (await this.query(
@@ -763,12 +786,25 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       {
         id: "016_performance_coaching",
         statements: [
-          "create table if not exists performance_goals (id text primary key, user_id text not null references users(id) on delete cascade, distance_meters double precision not null, target_seconds integer not null, target_date date not null, training_days_per_week integer not null, preferred_long_run_day integer not null, status text not null check (status in ('active','completed','abandoned','archived')), consent_version text not null, analysis jsonb not null default '{}'::jsonb, created_at timestamptz not null default now(), updated_at timestamptz not null default now())",
+          "create table if not exists performance_goals (id text primary key, user_id text not null references users(id) on delete cascade, distance_meters double precision not null, target_seconds integer not null, target_date date not null, training_days_per_week integer not null, preferred_long_run_day integer not null, status text not null check (status in ('active','completed','abandoned','archived')), consent_version text not null, baseline_seconds integer, baseline_workout_id text references workout_summaries(id) on delete set null, analysis jsonb not null default '{}'::jsonb, created_at timestamptz not null default now(), updated_at timestamptz not null default now())",
           "create unique index if not exists performance_goals_one_active_per_user on performance_goals(user_id) where status = 'active'",
           "create table if not exists performance_goal_milestones (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, sequence integer not null, target_seconds integer not null, target_date date not null, status text not null default 'pending' check (status in ('pending','completed','missed')), completed_workout_id text references workout_summaries(id) on delete set null, unique(performance_goal_id,sequence))",
           "create table if not exists training_plans (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, version integer not null, model text not null, summary text not null, gap_explanation text not null, recovery_guidance text not null, caution text not null, generated_at timestamptz not null default now(), unique(performance_goal_id,version))",
           "create table if not exists training_sessions (id text primary key, plan_id text not null references training_plans(id) on delete cascade, scheduled_date date not null, type text not null, title text not null, purpose text not null, distance_meters double precision, duration_seconds integer, effort text not null, status text not null default 'scheduled' check (status in ('scheduled','completed','skipped')), linked_workout_id text references workout_summaries(id) on delete set null)",
           "create table if not exists coach_generations (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, input_fingerprint text not null, reason text not null, status text not null, model text not null, failure_reason text, created_at timestamptz not null default now(), completed_at timestamptz)"
+        ]
+      },
+      {
+        id: "017_performance_goal_baseline",
+        statements: [
+          "alter table performance_goals add column if not exists baseline_seconds integer",
+          "update performance_goals set baseline_seconds = nullif((analysis->>'currentBestSeconds')::integer, 0) where baseline_seconds is null and analysis ? 'currentBestSeconds'"
+        ]
+      },
+      {
+        id: "018_performance_goal_baseline_workout",
+        statements: [
+          "alter table performance_goals add column if not exists baseline_workout_id text references workout_summaries(id) on delete set null"
         ]
       }
     ];
@@ -1142,6 +1178,11 @@ function mapTrainingSession(row: any): TrainingSession {
 
 function generatedId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function performanceFeasibility(currentSeconds: number, targetSeconds: number): PerformanceGoalAnalysis["feasibility"] {
+  const ratio = (currentSeconds - targetSeconds) / targetSeconds;
+  return ratio <= 0.08 ? "onTrack" : ratio <= 0.2 ? "ambitious" : "stretch";
 }
 
 function mapUser(row: any): User {

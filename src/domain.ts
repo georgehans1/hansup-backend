@@ -138,6 +138,8 @@ export interface PerformanceGoal {
   preferredLongRunDay: number;
   status: PerformanceGoalStatus;
   consentVersion: string;
+  baselineSeconds?: number;
+  baselineWorkoutId?: ID;
   analysis: PerformanceGoalAnalysis;
   createdAt: string;
   updatedAt: string;
