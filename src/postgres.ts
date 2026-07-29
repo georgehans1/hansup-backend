@@ -68,6 +68,8 @@ export type PersistenceChange =
   | { kind: "reaction"; reactionId: string }
   | { kind: "message-reactions"; messageId: string }
   | { kind: "challenge"; challengeId: string; includeSharedMessages?: boolean }
+  | { kind: "challenge-comment"; commentId: string }
+  | { kind: "profile-highlights"; userId: string }
   | { kind: "device"; userId: string; token: string }
   | { kind: "report"; reportId: string }
   | { kind: "notifications" }
@@ -135,6 +137,12 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       id: row.id, reporterId: row.reporter_id, targetType: row.target_type, targetId: row.target_id, reason: row.reason, createdAt: dateString(row.created_at)
     }));
     const notifications = (await this.query("select * from notifications order by created_at")).rows.map(mapNotification);
+    const challengeComments = (await this.query("select * from challenge_comments order by created_at")).rows.map((row) => ({
+      id: row.id, challengeId: row.challenge_id, userId: row.user_id, body: row.body, createdAt: dateString(row.created_at)
+    }));
+    const profileHighlights = (await this.query("select * from profile_highlights order by position")).rows.map((row) => ({
+      id: row.id, userId: row.user_id, kind: row.kind, entityId: row.entity_id, position: row.position, createdAt: dateString(row.created_at)
+    }));
 
     for (const challenge of challenges) {
       challenge.participants = participants.filter((row) => row.challenge_id === challenge.id).map(mapChallengeParticipant);
@@ -170,7 +178,9 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       blockedUsers,
       deviceTokens,
       reports,
-      notifications
+      notifications,
+      challengeComments,
+      profileHighlights
     };
   }
 
@@ -192,6 +202,14 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       await this.insertChallenge(challenge);
       for (const participant of challenge.participants) await this.insertChallengeParticipant(challenge.id, participant);
     }
+    for (const comment of store.challengeComments) await this.query(
+      "insert into challenge_comments (id, challenge_id, user_id, body, created_at) values ($1,$2,$3,$4,$5) on conflict (id) do update set body=excluded.body",
+      [comment.id, comment.challengeId, comment.userId, comment.body, comment.createdAt]
+    );
+    for (const item of store.profileHighlights) await this.query(
+      "insert into profile_highlights (id, user_id, kind, entity_id, position, created_at) values ($1,$2,$3,$4,$5,$6) on conflict (id) do update set position=excluded.position",
+      [item.id, item.userId, item.kind, item.entityId, item.position, item.createdAt]
+    );
     for (const conversation of store.conversations) {
       await this.insertConversation(conversation);
       for (const userId of conversation.mutedBy) await this.query(
@@ -361,6 +379,23 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
         }
         return;
       }
+      case "challenge-comment": {
+        const comment = required(store.challengeComments.find((item) => item.id === change.commentId), "Challenge comment");
+        await this.query(
+          "insert into challenge_comments (id, challenge_id, user_id, body, created_at) values ($1,$2,$3,$4,$5) on conflict (id) do update set body=excluded.body",
+          [comment.id, comment.challengeId, comment.userId, comment.body, comment.createdAt]
+        );
+        return;
+      }
+      case "profile-highlights":
+        await this.query("delete from profile_highlights where user_id=$1", [change.userId]);
+        for (const item of store.profileHighlights.filter((value) => value.userId === change.userId)) {
+          await this.query(
+            "insert into profile_highlights (id,user_id,kind,entity_id,position,created_at) values ($1,$2,$3,$4,$5,$6)",
+            [item.id,item.userId,item.kind,item.entityId,item.position,item.createdAt]
+          );
+        }
+        return;
       case "device": {
         const token = required(
           store.deviceTokens.find((item) => item.userId === change.userId && item.token === change.token),
@@ -1430,6 +1465,25 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
             engine_version text not null,generated_at timestamptz not null default now(),updated_at timestamptz not null default now())`,
           "create index if not exists workout_insights_user_idx on workout_insights(user_id,updated_at desc)"
         ]
+      },
+      {
+        id: "024_social_activity_challenges_highlights",
+        statements: [
+          "alter table workout_summaries add column if not exists automatic_title text",
+          "alter table workout_summaries add column if not exists custom_title text",
+          "alter table workout_summaries add column if not exists note text",
+          "alter table workout_summaries add column if not exists effort_rating integer",
+          "alter table workout_summaries add column if not exists visibility text not null default 'friends'",
+          "alter table challenges add column if not exists private_note text",
+          "alter table challenges add column if not exists survivor_daily_target double precision",
+          "alter table challenges add column if not exists survivor_lives integer",
+          "alter table challenge_participants add column if not exists eliminated_at date",
+          "alter table challenge_participants add column if not exists lives_remaining integer",
+          "alter table challenge_participants add column if not exists missed_days jsonb not null default '[]'::jsonb",
+          "create table if not exists challenge_comments (id text primary key,challenge_id text not null references challenges(id) on delete cascade,user_id text not null references users(id) on delete cascade,body text not null,created_at timestamptz not null default now())",
+          "create index if not exists challenge_comments_challenge_created_idx on challenge_comments(challenge_id,created_at desc)",
+          "create table if not exists profile_highlights (id text primary key,user_id text not null references users(id) on delete cascade,kind text not null,entity_id text not null,position integer not null,created_at timestamptz not null default now(),unique(user_id,position),unique(user_id,kind,entity_id))"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -1444,6 +1498,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   private async clearDomainTables() {
     await this.query(
       `delete from message_reads;
+       delete from profile_highlights;
+       delete from challenge_comments;
        delete from notifications;
        delete from conversation_mutes;
        delete from reactions;
@@ -1558,14 +1614,17 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   private insertWorkout(workout: WorkoutSummary) {
     return this.query(
       `insert into workout_summaries
-        (id, user_id, healthkit_uuid, activity_type, started_at, ended_at, duration_seconds, distance_meters, calories, source, trust_level, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        (id, user_id, healthkit_uuid, activity_type, started_at, ended_at, duration_seconds, distance_meters, calories, source, trust_level, updated_at, automatic_title, custom_title, note, effort_rating, visibility)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        on conflict (user_id, healthkit_uuid) do update set activity_type = excluded.activity_type,
          started_at = excluded.started_at, ended_at = excluded.ended_at, duration_seconds = excluded.duration_seconds,
          distance_meters = excluded.distance_meters, calories = excluded.calories, trust_level = excluded.trust_level,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at, automatic_title = coalesce(workout_summaries.automatic_title, excluded.automatic_title),
+         custom_title = workout_summaries.custom_title, note = workout_summaries.note,
+         effort_rating = workout_summaries.effort_rating, visibility = workout_summaries.visibility`,
       [workout.id, workout.userId, workout.healthkitUUID, workout.activityType, workout.startedAt, workout.endedAt,
-        workout.durationSeconds, workout.distanceMeters, workout.calories, workout.source, workout.trustLevel, workout.updatedAt]
+        workout.durationSeconds, workout.distanceMeters, workout.calories, workout.source, workout.trustLevel, workout.updatedAt,
+        workout.automaticTitle, workout.customTitle, workout.note, workout.effortRating, workout.visibility ?? "friends"]
     );
   }
 
@@ -1653,18 +1712,20 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   private insertChallenge(challenge: Challenge) {
     return this.query(
-      `insert into challenges (id, creator_id, title, kind, template, starts_on, ends_on, status, mode, target, rematch_of_challenge_id, shared_conversation_id, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) on conflict (id) do update set status = excluded.status,
-         mode = excluded.mode, target = excluded.target, shared_conversation_id = excluded.shared_conversation_id`,
+      `insert into challenges (id, creator_id, title, kind, template, starts_on, ends_on, status, mode, target, rematch_of_challenge_id, shared_conversation_id, created_at, private_note, survivor_daily_target, survivor_lives)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) on conflict (id) do update set status = excluded.status,
+         mode = excluded.mode, target = excluded.target, shared_conversation_id = excluded.shared_conversation_id,
+         private_note=excluded.private_note,survivor_daily_target=excluded.survivor_daily_target,survivor_lives=excluded.survivor_lives`,
       [challenge.id, challenge.creatorId, challenge.title, challenge.kind, challenge.template, challenge.startsOn, challenge.endsOn, challenge.status,
-        challenge.mode ?? "competitive", challenge.target, challenge.rematchOfChallengeId, challenge.sharedConversationId, challenge.createdAt]
+        challenge.mode ?? "competitive", challenge.target, challenge.rematchOfChallengeId, challenge.sharedConversationId, challenge.createdAt,
+        challenge.privateNote, challenge.survivorDailyTarget, challenge.survivorLives]
     );
   }
 
   private insertChallengeParticipant(challengeId: string, participant: Challenge["participants"][number]) {
     return this.query(
-      "insert into challenge_participants (challenge_id, user_id, accepted, score, responded_at, team_id) values ($1, $2, $3, $4, $5, $6) on conflict (challenge_id, user_id) do update set accepted = excluded.accepted, score = excluded.score, responded_at = excluded.responded_at, team_id = excluded.team_id",
-      [challengeId, participant.userId, participant.accepted, participant.score, participant.respondedAt, participant.teamId]
+      "insert into challenge_participants (challenge_id, user_id, accepted, score, responded_at, team_id, eliminated_at, lives_remaining, missed_days) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (challenge_id, user_id) do update set accepted=excluded.accepted,score=excluded.score,responded_at=excluded.responded_at,team_id=excluded.team_id,eliminated_at=excluded.eliminated_at,lives_remaining=excluded.lives_remaining,missed_days=excluded.missed_days",
+      [challengeId, participant.userId, participant.accepted, participant.score, participant.respondedAt, participant.teamId, participant.eliminatedAt, participant.livesRemaining, JSON.stringify(participant.missedDays ?? [])]
     );
   }
 
@@ -2032,7 +2093,12 @@ function mapWorkout(row: any): WorkoutSummary {
     calories: row.calories,
     source: row.source,
     trustLevel: row.trust_level,
-    updatedAt: dateString(row.updated_at)
+    updatedAt: dateString(row.updated_at),
+    automaticTitle: row.automatic_title ?? undefined,
+    customTitle: row.custom_title ?? undefined,
+    note: row.note ?? undefined,
+    effortRating: row.effort_rating ?? undefined,
+    visibility: row.visibility ?? "friends"
   };
 }
 
@@ -2059,12 +2125,15 @@ function mapChallenge(row: any): Challenge {
     participants: [],
     rematchOfChallengeId: row.rematch_of_challenge_id,
     sharedConversationId: row.shared_conversation_id,
-    createdAt: dateString(row.created_at)
+    createdAt: dateString(row.created_at),
+    privateNote: row.private_note ?? undefined,
+    survivorDailyTarget: row.survivor_daily_target == null ? undefined : Number(row.survivor_daily_target),
+    survivorLives: row.survivor_lives == null ? undefined : Number(row.survivor_lives)
   };
 }
 
 function mapChallengeParticipant(row: any): Challenge["participants"][number] {
-  return { userId: row.user_id, accepted: row.accepted, score: row.score, respondedAt: nullableDate(row.responded_at), teamId: row.team_id ?? undefined };
+  return { userId: row.user_id, accepted: row.accepted, score: row.score, respondedAt: nullableDate(row.responded_at), teamId: row.team_id ?? undefined, eliminatedAt: row.eliminated_at ? dateString(row.eliminated_at).slice(0, 10) : undefined, livesRemaining: row.lives_remaining ?? undefined, missedDays: Array.isArray(row.missed_days) ? row.missed_days : [] };
 }
 
 function mapFeedItem(row: any): FeedItem {

@@ -81,6 +81,11 @@ CREATE TABLE workout_summaries (
   source text NOT NULL DEFAULT 'healthkit',
   trust_level text NOT NULL DEFAULT 'verified',
   updated_at timestamptz NOT NULL DEFAULT now(),
+  automatic_title text,
+  custom_title text,
+  note text,
+  effort_rating integer CHECK (effort_rating BETWEEN 1 AND 5),
+  visibility text NOT NULL DEFAULT 'friends' CHECK (visibility IN ('friends', 'private')),
   UNIQUE(user_id, healthkit_uuid)
 );
 
@@ -126,6 +131,30 @@ CREATE TABLE goals (
   target double precision NOT NULL,
   is_enabled boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
+  ,private_note text
+  ,survivor_daily_target double precision
+  ,survivor_lives integer
+);
+
+CREATE TABLE challenge_comments (
+  id text PRIMARY KEY,
+  challenge_id text NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX challenge_comments_challenge_created_idx ON challenge_comments(challenge_id, created_at DESC);
+
+CREATE TABLE profile_highlights (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  entity_id text NOT NULL,
+  position integer NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(user_id, position),
+  UNIQUE(user_id, kind, entity_id)
 );
 
 CREATE TABLE goal_versions (
@@ -311,6 +340,9 @@ CREATE TABLE challenge_participants (
   score double precision NOT NULL DEFAULT 0,
   responded_at timestamptz,
   team_id text,
+  eliminated_at date,
+  lives_remaining integer,
+  missed_days jsonb NOT NULL DEFAULT '[]'::jsonb,
   PRIMARY KEY(challenge_id, user_id)
 );
 
