@@ -22,7 +22,9 @@ export async function generateGeminiPlan(config: ProductionConfig, detail: Perfo
       "Do not diagnose injuries or provide medical treatment.",
       "Return JSON only. Create one rolling block covering no more than the next 28 days.",
       "Session type must be exactly one of easy, recovery, tempo, intervals, longRun, progression, or timeTrial.",
-      "Use ISO YYYY-MM-DD dates. Include recovery days implicitly, not as sessions."
+      "Use ISO YYYY-MM-DD dates. Include recovery days implicitly, not as sessions.",
+      "Tailor every distance to the selected goal distance and the runner's current benchmark. Longer aerobic runs may exceed goal distance only conservatively.",
+      "Give every session a realistic target pace range in seconds per kilometre and concise pacing guidance. Use even-split guidance unless the session is progression or intervals."
     ]
   };
   const response = await fetch(
@@ -46,7 +48,7 @@ export async function generateGeminiPlan(config: ProductionConfig, detail: Perfo
                 type: "ARRAY",
                 items: {
                   type: "OBJECT",
-                  required: ["scheduledDate", "type", "title", "purpose", "effort"],
+                  required: ["scheduledDate", "type", "title", "purpose", "effort", "targetPaceMinSecondsPerKm", "targetPaceMaxSecondsPerKm", "pacingGuidance"],
                   properties: {
                     scheduledDate: { type: "STRING" },
                     type: { type: "STRING", enum: ["easy", "recovery", "tempo", "intervals", "longRun", "progression", "timeTrial"] },
@@ -54,6 +56,9 @@ export async function generateGeminiPlan(config: ProductionConfig, detail: Perfo
                     purpose: { type: "STRING" },
                     distanceMeters: { type: "NUMBER" },
                     durationSeconds: { type: "INTEGER" },
+                    targetPaceMinSecondsPerKm: { type: "INTEGER" },
+                    targetPaceMaxSecondsPerKm: { type: "INTEGER" },
+                    pacingGuidance: { type: "STRING" },
                     effort: { type: "STRING" }
                   }
                 }
@@ -127,7 +132,8 @@ function validatePlan(plan: PlanDraft) {
   if (plan.sessions.length > 28) throw new Error("Coach returned too many sessions");
   const validTypes = new Set(["easy", "recovery", "tempo", "intervals", "longRun", "progression", "timeTrial"]);
   for (const session of plan.sessions) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(session.scheduledDate) || !validTypes.has(session.type) || !session.title || !session.purpose || !session.effort) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(session.scheduledDate) || !validTypes.has(session.type) || !session.title || !session.purpose || !session.effort
+      || !session.targetPaceMinSecondsPerKm || !session.targetPaceMaxSecondsPerKm || !session.pacingGuidance) {
       throw new Error("Coach returned an invalid session");
     }
   }

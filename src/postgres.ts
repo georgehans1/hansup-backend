@@ -574,21 +574,22 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
        exists(select 1 from performance_goal_evidence e where e.performance_goal_id = $2 and e.workout_id = w.id) as already_linked
        from workout_summaries w
        where w.user_id = $1 and w.activity_type = 'running'
+       and w.started_at::date >= coalesce(
+         (select min(s.scheduled_date) from training_sessions s join training_plans p on p.id=s.plan_id
+          where p.performance_goal_id=$2 and p.status='active'),
+         (select created_at::date from performance_goals where id=$2)
+       )
+       and abs(w.distance_meters - $3) <= $4
        order by w.started_at desc limit 60`,
-      [userId, goalId]
+      [userId, goalId, detail.goal.distanceMeters, tolerance]
     )).rows;
-    const sessions = detail.plan?.sessions.filter((item) => item.status === "scheduled") ?? [];
     return rows.map((row) => {
       const workout = mapWorkout(row);
-      const qualifiesBenchmark = Math.abs(workout.distanceMeters - detail.goal.distanceMeters) <= tolerance;
-      const matchingSessionIds = sessions.filter((session) => sessionMatchScore(session, workout) >= 0.65).map((session) => session.id);
       return {
         workout,
-        qualifiesBenchmark,
-        reason: qualifiesBenchmark
-          ? `Explicit ${formatDistance(detail.goal.distanceMeters)} run within the qualifying distance range`
-          : matchingSessionIds.length ? "Useful preparation run that can be linked to a training session" : "Does not match the goal distance or a current session",
-        matchingSessionIds,
+        qualifiesBenchmark: true,
+        reason: `Explicit ${formatDistance(detail.goal.distanceMeters)} run completed after training began`,
+        matchingSessionIds: [],
         alreadyLinked: Boolean(row.already_linked)
       };
     });
@@ -600,10 +601,14 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     const tolerance = Math.max(75, detail.goal.distanceMeters * 0.015);
     const workout = (await this.query(
       `select * from workout_summaries where id = $1 and user_id = $2 and activity_type = 'running'
-       and abs(distance_meters - $3) <= $4`,
-      [workoutId, userId, detail.goal.distanceMeters, tolerance]
+       and abs(distance_meters - $3) <= $4 and started_at::date >= coalesce(
+         (select min(s.scheduled_date) from training_sessions s join training_plans p on p.id=s.plan_id
+          where p.performance_goal_id=$5 and p.status='active'),
+         (select created_at::date from performance_goals where id=$5)
+       )`,
+      [workoutId, userId, detail.goal.distanceMeters, tolerance, goalId]
     )).rows[0];
-    if (!workout) throw new Error("Selected run does not qualify as a benchmark");
+    if (!workout) throw new Error("Select a goal-distance run completed after training began");
     const seconds = Math.round(Number(workout.duration_seconds));
     await this.transaction(async (query) => {
       await query(
@@ -651,6 +656,19 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   }): Promise<PerformanceGoalDetail> {
     const note = input.note?.trim().slice(0, 500);
     if (input.effortFeedback && !["easy", "onTarget", "hard"].includes(input.effortFeedback)) throw new Error("Invalid effort feedback");
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail || detail.goal.status !== "active") throw new Error("Active performance goal not found");
+    const tolerance = Math.max(75, detail.goal.distanceMeters * 0.015);
+    const eligible = (await this.query(
+      `select 1 from workout_summaries w where w.id=$1 and w.user_id=$2 and w.activity_type='running'
+       and abs(w.distance_meters-$3) <= $4 and w.started_at::date >= coalesce(
+         (select min(s.scheduled_date) from training_sessions s join training_plans p on p.id=s.plan_id
+          where p.performance_goal_id=$5 and p.status='active'),
+         (select created_at::date from performance_goals where id=$5)
+       )`,
+      [input.workoutId, userId, detail.goal.distanceMeters, tolerance, goalId]
+    )).rows.length;
+    if (!eligible) throw new Error("Only goal-distance runs completed after training began can be checked in here");
     await this.query(
       `insert into performance_run_checkins (performance_goal_id,workout_id,effort_feedback,note)
        select $1,$2,$3,$4 where exists(select 1 from performance_goals where id = $1 and user_id = $5)
@@ -768,7 +786,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
        and started_at::date between ($2::date - interval '2 days') and ($2::date + interval '2 days')
        order by abs(started_at::date - $2::date),started_at desc`,
       [userId, session.scheduledDate]
-    )).rows.map(mapWorkout).filter((workout) => sessionMatchScore(session, workout) >= 0.45).slice(0, 8);
+    )).rows.map(mapWorkout).filter((workout) => sessionMatchScore(session, workout) >= 0.25).slice(0, 8);
     return {
       session,
       linkedWorkout: linkedWorkout ? mapWorkout(linkedWorkout) : undefined,
@@ -793,7 +811,10 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       prescription: {
         type: detail.session.type, title: detail.session.title, purpose: detail.session.purpose,
         scheduledDate: detail.session.scheduledDate, distanceMeters: detail.session.distanceMeters,
-        durationSeconds: detail.session.durationSeconds, effort: detail.session.effort
+        durationSeconds: detail.session.durationSeconds, effort: detail.session.effort,
+        targetPaceMinSecondsPerKm: detail.session.targetPaceMinSecondsPerKm,
+        targetPaceMaxSecondsPerKm: detail.session.targetPaceMaxSecondsPerKm,
+        pacingGuidance: detail.session.pacingGuidance
       },
       result: {
         workoutId: detail.linkedWorkout.id,
@@ -889,6 +910,12 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   async saveTrainingPlan(goalId: string, model: string, content: Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt" | "sessions"> & { sessions: Array<Omit<TrainingSession, "id" | "planId" | "status">> }, bypassCooldown = false): Promise<TrainingPlan> {
     const latest = (await this.query("select generated_at from training_plans where performance_goal_id = $1 order by version desc limit 1", [goalId])).rows[0];
     if (!bypassCooldown && latest && Date.now() - Date.parse(latest.generated_at) < 15 * 60_000) throw new Error("Your plan was updated recently. Try again in a few minutes.");
+    const goalRow = (await this.query("select distance_meters,target_seconds,analysis from performance_goals where id=$1", [goalId])).rows[0];
+    if (!goalRow) throw new Error("Performance goal not found");
+    const goalDistance = Number(goalRow.distance_meters);
+    const targetPace = Math.round(Number(goalRow.target_seconds) / (goalDistance / 1000));
+    const currentPace = Number(goalRow.analysis?.currentPaceSecondsPerKm ?? targetPace + 45);
+    const sessions = content.sessions.map((session) => normalizeTrainingPrescription(session, goalDistance, targetPace, currentPace));
     const version = Number((await this.query("select coalesce(max(version),0)+1 as version from training_plans where performance_goal_id = $1", [goalId])).rows[0].version);
     const planId = generatedId("tp");
     await this.transaction(async (query) => {
@@ -903,11 +930,14 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
          values ($1,$2,$3,$4,$5,$6,$7,$8,'active')`,
         [planId, goalId, version, model, content.summary, content.gapExplanation, content.recoveryGuidance, content.caution]
       );
-      for (const session of content.sessions) {
+      for (const session of sessions) {
         await query(
-          `insert into training_sessions (id,plan_id,scheduled_date,type,title,purpose,distance_meters,duration_seconds,effort)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [generatedId("ts"), planId, session.scheduledDate, session.type, session.title, session.purpose, session.distanceMeters ?? null, session.durationSeconds ?? null, session.effort]
+          `insert into training_sessions
+           (id,plan_id,scheduled_date,type,title,purpose,distance_meters,duration_seconds,target_pace_min_seconds_per_km,target_pace_max_seconds_per_km,pacing_guidance,effort)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          [generatedId("ts"), planId, session.scheduledDate, session.type, session.title, session.purpose,
+           session.distanceMeters ?? null, session.durationSeconds ?? null, session.targetPaceMinSecondsPerKm,
+           session.targetPaceMaxSecondsPerKm, session.pacingGuidance, session.effort]
         );
       }
     });
@@ -1308,6 +1338,14 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
         statements: [
           "create table if not exists training_session_analyses (id text primary key, training_session_id text not null references training_sessions(id) on delete cascade, workout_id text not null references workout_summaries(id) on delete cascade, summary text not null, observations jsonb not null default '[]'::jsonb, recommendation text not null, model text not null, generated_at timestamptz not null default now(), unique(training_session_id,workout_id))"
         ]
+      },
+      {
+        id: "021_training_session_pacing",
+        statements: [
+          "alter table training_sessions add column if not exists target_pace_min_seconds_per_km integer",
+          "alter table training_sessions add column if not exists target_pace_max_seconds_per_km integer",
+          "alter table training_sessions add column if not exists pacing_guidance text"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -1674,6 +1712,9 @@ function mapTrainingSession(row: any): TrainingSession {
     type: row.type, title: row.title, purpose: row.purpose,
     distanceMeters: row.distance_meters == null ? undefined : Number(row.distance_meters),
     durationSeconds: row.duration_seconds == null ? undefined : Number(row.duration_seconds),
+    targetPaceMinSecondsPerKm: row.target_pace_min_seconds_per_km == null ? undefined : Number(row.target_pace_min_seconds_per_km),
+    targetPaceMaxSecondsPerKm: row.target_pace_max_seconds_per_km == null ? undefined : Number(row.target_pace_max_seconds_per_km),
+    pacingGuidance: row.pacing_guidance ?? undefined,
     effort: row.effort, status: row.status, linkedWorkoutId: row.linked_workout_id ?? undefined,
     quality: row.quality ?? undefined,
     matchConfidence: row.match_confidence == null ? undefined : Number(row.match_confidence)
@@ -1760,10 +1801,9 @@ export function sessionMatchScore(session: TrainingSession, workout: WorkoutSumm
   if (dayDifference > 2) return 0;
   let prescriptionScore = 0.65;
   if (session.distanceMeters != null) {
-    const tolerance = Math.max(100, session.distanceMeters * 0.05);
-    const difference = Math.abs(workout.distanceMeters - session.distanceMeters);
-    if (difference > tolerance * 2) return 0;
-    prescriptionScore = Math.max(0.35, 1 - difference / (tolerance * 2));
+    const relativeDifference = Math.abs(workout.distanceMeters - session.distanceMeters) / session.distanceMeters;
+    if (relativeDifference > 0.35) return 0;
+    prescriptionScore = Math.max(0.25, 1 - relativeDifference / 0.35);
   } else if (session.durationSeconds != null) {
     const difference = Math.abs(workout.durationSeconds - session.durationSeconds);
     if (difference > session.durationSeconds * 0.3) return 0;
@@ -1783,6 +1823,38 @@ export function sessionQuality(session: TrainingSession, workout: WorkoutSummary
     if (difference > session.durationSeconds * 0.15) return "partial";
   }
   return session.type === "timeTrial" || session.type === "tempo" || session.type === "intervals" ? "targetMet" : "completed";
+}
+
+function normalizeTrainingPrescription(
+  session: Omit<TrainingSession, "id" | "planId" | "status">,
+  goalDistance: number,
+  targetPace: number,
+  currentPace: number
+): Omit<TrainingSession, "id" | "planId" | "status"> {
+  const maximumDistanceMultiplier = session.type === "longRun" ? 1.5 : session.type === "intervals" ? 1.25 : 1.2;
+  const maximumDistance = Math.max(goalDistance, goalDistance * maximumDistanceMultiplier);
+  const distanceMeters = session.distanceMeters == null ? undefined : Math.round(Math.min(session.distanceMeters, maximumDistance));
+  const defaults: Record<string, [number, number, string]> = {
+    easy: [currentPace + 35, currentPace + 75, "Settle into an even, conversational pace and keep every kilometre controlled."],
+    recovery: [currentPace + 55, currentPace + 95, "Keep the effort relaxed and the splits even; speed is not the priority."],
+    tempo: [Math.max(targetPace + 10, currentPace - 20), Math.max(targetPace + 25, currentPace), "Run controlled, even splits and avoid starting faster than the prescribed range."],
+    intervals: [Math.max(1, targetPace - 12), targetPace + 5, "Hold the prescribed pace during each work interval and recover fully between repetitions."],
+    longRun: [currentPace + 40, currentPace + 80, "Keep the opening conservative and aim for even splits through the final kilometre."],
+    progression: [currentPace + 45, Math.max(targetPace + 10, currentPace - 10), "Begin at the slower end and gradually finish near the faster end of the range."],
+    timeTrial: [targetPace, targetPace + 10, "Aim for even splits at target pace; avoid banking time in the opening kilometre."]
+  };
+  const fallback = defaults[session.type] ?? defaults.easy;
+  const suppliedMin = session.targetPaceMinSecondsPerKm;
+  const suppliedMax = session.targetPaceMaxSecondsPerKm;
+  const lower = Math.max(1, Math.min(suppliedMin ?? fallback[0], suppliedMax ?? fallback[1]));
+  const upper = Math.max(lower, Math.max(suppliedMin ?? fallback[0], suppliedMax ?? fallback[1]));
+  return {
+    ...session,
+    distanceMeters,
+    targetPaceMinSecondsPerKm: lower,
+    targetPaceMaxSecondsPerKm: upper,
+    pacingGuidance: session.pacingGuidance?.trim() || fallback[2]
+  };
 }
 
 function formatDistance(meters: number): string {

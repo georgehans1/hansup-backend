@@ -158,6 +158,9 @@ export interface TrainingSession {
   purpose: string;
   distanceMeters?: number;
   durationSeconds?: number;
+  targetPaceMinSecondsPerKm?: number;
+  targetPaceMaxSecondsPerKm?: number;
+  pacingGuidance?: string;
   effort: string;
   status: TrainingSessionStatus;
   linkedWorkoutId?: ID;
