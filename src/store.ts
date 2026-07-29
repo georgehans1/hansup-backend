@@ -8,6 +8,7 @@ import {
   ChallengeCareerStats,
   ChallengeParticipant,
   ChallengeTemplate,
+  CircleTimelineEntry,
   Conversation,
   ConversationMember,
   FeedItem,
@@ -408,6 +409,59 @@ export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset
       : workout);
 }
 
+export function circleTimeline(
+  store: AppStore,
+  viewerId: ID,
+  limit = 20,
+  cursor?: string,
+  filter = "all"
+): { items: CircleTimelineEntry[]; nextCursor?: string } {
+  const friendIds = new Set(friendsFor(store, viewerId).map((user) => user.id));
+  const visible = (userId: ID) =>
+    friendIds.has(userId) && !store.settings.find((item) => item.userId === userId)?.hideActivityFromFriends;
+  const workoutEntries: CircleTimelineEntry[] = store.workouts
+    .filter((workout) => visible(workout.userId))
+    .filter((workout) => ["all", "activities", workout.activityType].includes(filter))
+    .map((workout) => {
+      const hideExact = store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers;
+      const safeWorkout = hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;
+      return {
+        id: `circle_workout_${workout.id}`,
+        type: "workout",
+        user: publicProfile(store, viewerId, workout.userId),
+        createdAt: workout.startedAt,
+        title: activityKindLabel(workout.activityType),
+        summary: hideExact ? "Completed a new activity." : workoutTimelineSummary(workout),
+        workout: safeWorkout,
+        reactions: []
+      };
+    });
+  const milestoneEntries: CircleTimelineEntry[] = store.feed
+    .filter((item) => visible(item.userId) && ["streak", "badge"].includes(item.type))
+    .filter((item) => ["all", "milestones"].includes(filter))
+    .map((item) => ({
+      id: `circle_${item.id}`,
+      type: item.type === "badge" ? "badgeEarned" : "streakMilestone",
+      user: publicProfile(store, viewerId, item.userId),
+      createdAt: item.createdAt,
+      title: item.title,
+      summary: item.body,
+      badge: item.type === "badge" ? store.badges.find((badge) => badge.id === item.entityId) : undefined,
+      streakCount: item.type === "streak" ? Number(item.metadata?.streakCount ?? 0) : undefined,
+      reactions: item.reactions
+    }));
+  const all = [...workoutEntries, ...milestoneEntries]
+    .filter((item) => !cursor || item.createdAt < cursor)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const page = all.slice(0, Math.min(Math.max(limit, 1), 50));
+  return { items: page, nextCursor: all.length > page.length ? page.at(-1)?.createdAt : undefined };
+}
+
+function workoutTimelineSummary(workout: WorkoutSummary): string {
+  if (workout.activityType === "strengthTraining") return `${Math.round(workout.durationSeconds / 60)} min strength session`;
+  return `${Number((workout.distanceMeters / 1000).toFixed(2))} km in ${Math.round(workout.durationSeconds / 60)} min`;
+}
+
 export function workoutForViewer(store: AppStore, viewerId: ID, workoutId: ID) {
   const workout = store.workouts.find((item) => item.id === workoutId);
   if (!workout) throw new Error("Activity not found");
@@ -700,7 +754,11 @@ export function conversationsFor(store: AppStore, userId: ID) {
     conversation,
     members: store.conversationMembers.filter((item) => item.conversationId === conversation.id),
     lastMessage: store.messages.filter((item) => item.conversationId === conversation.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0],
-    unreadCount: store.messages.filter((item) => item.conversationId === conversation.id && !item.readBy.includes(userId)).length
+    unreadCount: store.messages.filter((item) => {
+      if (item.conversationId !== conversation.id || item.senderId === userId) return false;
+      const member = store.conversationMembers.find((candidate) => candidate.conversationId === conversation.id && candidate.userId === userId);
+      return !member?.lastReadAt || item.createdAt > member.lastReadAt;
+    }).length
   }));
 }
 
@@ -1043,6 +1101,17 @@ export function refreshBadgesForUser(store: AppStore, userId: ID) {
     id: `user_badge_${userId}_${item.badgeId}`, userId, badgeId: item.badgeId, earnedAt: now
   }));
   store.userBadges.push(...newlyEarned);
+  for (const award of newlyEarned) {
+    const badge = store.badges.find((item) => item.id === award.badgeId);
+    if (!badge || !["gold", "elite", "legendary"].includes(badge.difficulty ?? "bronze")) continue;
+    const feedId = `feed_badge_${award.id}`;
+    if (store.feed.some((item) => item.id === feedId)) continue;
+    store.feed.push(feedItem(
+      feedId, userId, "badge", `${badge.title} earned`,
+      badge.description ?? `Earned the ${badge.title} badge.`, award.earnedAt,
+      "badge", badge.id, { difficulty: badge.difficulty ?? "gold" }
+    ));
+  }
   return newlyEarned;
 }
 
@@ -1509,12 +1578,19 @@ function emitGoalStreakMilestones(store: AppStore, userId: ID, previous: Map<ID,
       metadata: { goalId: goal.id, goalKind: goal.kind, cadence: goal.cadence, streakCount: streak.currentCount },
       deduplicationKey: `goal-streak:${goal.id}:${streak.currentCount}`
     });
-    addMilestoneMessages(store, userId, `reached a ${body}`, `goal-streak:${goal.id}:${streak.currentCount}`);
+    const feedId = `feed_streak_${goal.id}_${streak.currentCount}`;
+    if (!store.feed.some((item) => item.id === feedId)) {
+      store.feed.push(feedItem(
+        feedId, userId, "streak", `${activityKindLabel(goal.kind)} streak milestone`,
+        `Reached a ${body}.`, new Date().toISOString(), "goal", goal.id,
+        { streakCount: String(streak.currentCount), cadence: goal.cadence, goalKind: goal.kind }
+      ));
+    }
   }
 }
 
 function isNotableStreak(value: number) {
-  return [1, 3, 7, 14, 30, 50, 100].includes(value) || (value > 100 && value % 50 === 0);
+  return [7, 14, 30, 50, 100, 150, 200, 250, 365].includes(value) || (value > 365 && value % 100 === 0);
 }
 
 function activityKindLabel(kind: ActivityKind) {
@@ -1522,20 +1598,6 @@ function activityKindLabel(kind: ActivityKind) {
     case "activeMinutes": return "Active Minutes";
     case "strengthTraining": return "Strength Training";
     default: return kind.charAt(0).toUpperCase() + kind.slice(1);
-  }
-}
-
-function addMilestoneMessages(store: AppStore, userId: ID, milestone: string, milestoneKey: string) {
-  const name = store.users.find((item) => item.id === userId)?.displayName ?? "A friend";
-  const groupIds = new Set(store.conversations.filter((item) => item.kind === "group").map((item) => item.id));
-  const conversationIds = store.conversationMembers
-    .filter((item) => item.userId === userId && groupIds.has(item.conversationId))
-    .map((item) => item.conversationId);
-  for (const conversationId of conversationIds) {
-    const body = `${name} ${milestone}.`;
-    const id = `message_milestone_${milestoneKey}_${conversationId}`.replace(/[^a-zA-Z0-9_-]/g, "_");
-    if (store.messages.some((item) => item.id === id)) continue;
-    store.messages.push(systemMessage(id, conversationId, body, new Date().toISOString()));
   }
 }
 
@@ -1622,8 +1684,11 @@ function participant(userId: ID, accepted: boolean, kind: Challenge["kind"], sum
   return { userId, accepted, score: scoreChallenge(kind, summaries.filter((item) => item.userId === userId)), respondedAt: accepted ? new Date().toISOString() : undefined };
 }
 
-function feedItem(id: ID, userId: ID, type: FeedItem["type"], title: string, body: string, createdAt: string): FeedItem {
-  return { id, userId, type, title, body, createdAt, reactions: [] };
+function feedItem(
+  id: ID, userId: ID, type: FeedItem["type"], title: string, body: string, createdAt: string,
+  entityType?: FeedItem["entityType"], entityId?: ID, metadata?: Record<string, string>
+): FeedItem {
+  return { id, userId, type, title, body, entityType, entityId, metadata, createdAt, reactions: [] };
 }
 
 function member(conversationId: ID, userId: ID, role: "owner" | "member", joinedAt: string): ConversationMember {
@@ -1823,5 +1888,13 @@ export function defaultBadges(): Badge[] {
 }
 
 function badge(id: string, title: string, emoji: string, ruleKind: Badge["ruleKind"], threshold: number, category: string, description: string): Badge {
-  return { id: `badge_${id}`, title, emoji, ruleKind, threshold, category, description };
+  return { id: `badge_${id}`, title, emoji, ruleKind, threshold, category, description, difficulty: badgeDifficulty(id) };
+}
+
+function badgeDifficulty(id: string): NonNullable<Badge["difficulty"]> {
+  if (["steps_5m", "streak_365", "run_half", "strength_100", "challenge_25"].includes(id)) return "legendary";
+  if (["steps_1m", "streak_100", "walk_500k", "run_500k", "wins_5", "strength_25"].includes(id)) return "elite";
+  if (["steps_30k", "streak_30", "walk_100k", "run_10k", "run_5k_30", "strength_60", "wins_3", "perfect_week"].includes(id)) return "gold";
+  if (["steps_20k", "streak_14", "walk_10k", "run_5k", "strength_week", "first_win"].includes(id)) return "silver";
+  return "bronze";
 }

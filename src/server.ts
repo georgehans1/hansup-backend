@@ -23,6 +23,7 @@ import {
   challengesFor,
   challengeCareerStats,
   challengeFor,
+  circleTimeline,
   conversationsFor,
   createConversation,
   createDemoStore,
@@ -357,6 +358,13 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/feed/friends") {
         return json(res, 200, friendActivity(store, userId, numberParam(url, "limit", 20), numberParam(url, "offset", 0)));
       }
+      if (req.method === "GET" && url.pathname === "/circle/timeline") {
+        return json(res, 200, circleTimeline(
+          store, userId, numberParam(url, "limit", 20),
+          url.searchParams.get("cursor") ?? undefined,
+          url.searchParams.get("type") ?? "all"
+        ));
+      }
 
       if (req.method === "GET" && url.pathname === "/activity/summaries") {
         return json(res, 200, activitySummariesFor(store, userId, url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined));
@@ -416,6 +424,18 @@ export function createServer(
         return json(res, 200, detail);
       }
       const workoutDetail = url.pathname.match(/^\/activities\/workouts\/([^/]+)$/);
+      const workoutInsights = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/insights$/);
+      if (workoutInsights) {
+        const workoutId = decodeURIComponent(workoutInsights[1]);
+        const workout = store.workouts.find((item) => item.id === workoutId);
+        if (!workout || workout.userId !== userId) throw new Error("Activity insights are available only to the activity owner");
+        if (!performanceGoals) return json(res, 503, { error: "Activity insights require PostgreSQL" });
+        if (req.method === "GET") return json(res, 200, { insights: await performanceGoals.workoutInsightsFor(userId, workoutId) ?? null });
+        if (req.method === "POST") {
+          const payload = await body<{ force?: boolean }>(req);
+          return json(res, 200, await performanceGoals.generateWorkoutInsights(userId, workoutId, payload.force === true));
+        }
+      }
       if (req.method === "GET" && workoutDetail) return json(res, 200, workoutForViewer(store, userId, decodeURIComponent(workoutDetail[1])));
       const summaryDetail = url.pathname.match(/^\/activities\/summaries\/([^/]+)$/);
       if (req.method === "GET" && summaryDetail) return json(res, 200, summaryForViewer(store, userId, decodeURIComponent(summaryDetail[1])));

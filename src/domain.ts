@@ -406,6 +406,9 @@ export interface FeedItem {
   type: FeedItemType;
   title: string;
   body: string;
+  entityType?: "workout" | "badge" | "goal";
+  entityId?: ID;
+  metadata?: Record<string, string>;
   createdAt: string;
   reactions: Reaction[];
 }
@@ -470,6 +473,46 @@ export interface Badge {
   threshold: number;
   category?: string;
   description?: string;
+  difficulty?: "bronze" | "silver" | "gold" | "elite" | "legendary";
+}
+
+export interface CircleTimelineEntry {
+  id: ID;
+  type: "workout" | "streakMilestone" | "badgeEarned";
+  user: PublicUserProfile;
+  createdAt: string;
+  title: string;
+  summary: string;
+  workout?: WorkoutSummary;
+  badge?: Badge;
+  streakCount?: number;
+  reactions: Reaction[];
+}
+
+export interface WorkoutInsightEvidence {
+  key: string;
+  label: string;
+  value: string;
+  splitIndex?: number;
+  category: "observed" | "interpretation" | "suggestion" | "limitation";
+}
+
+export interface WorkoutInsights {
+  workoutId: ID;
+  userId: ID;
+  activityType: "walking" | "running" | "strengthTraining";
+  headline: string;
+  overview: string;
+  positives: string[];
+  changes: string[];
+  suggestion: string;
+  evidence: WorkoutInsightEvidence[];
+  confidence: "limited" | "moderate" | "high";
+  limitations: string[];
+  sourceFingerprint: string;
+  engineVersion: string;
+  generatedAt: string;
+  updatedAt: string;
 }
 
 export interface BadgeProgress {

@@ -356,6 +356,9 @@ CREATE TABLE feed_items (
   type text NOT NULL,
   title text NOT NULL,
   body text NOT NULL,
+  entity_type text,
+  entity_id text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -364,7 +367,28 @@ CREATE TABLE badges (
   title text NOT NULL,
   emoji text NOT NULL,
   rule_kind text NOT NULL,
-  threshold double precision NOT NULL
+  threshold double precision NOT NULL,
+  category text,
+  description text,
+  difficulty text NOT NULL DEFAULT 'bronze'
+);
+
+CREATE TABLE workout_insights (
+  workout_id text PRIMARY KEY REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  activity_type text NOT NULL,
+  headline text NOT NULL,
+  overview text NOT NULL,
+  positives jsonb NOT NULL DEFAULT '[]'::jsonb,
+  changes jsonb NOT NULL DEFAULT '[]'::jsonb,
+  suggestion text NOT NULL,
+  evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
+  confidence text NOT NULL,
+  limitations jsonb NOT NULL DEFAULT '[]'::jsonb,
+  source_fingerprint text NOT NULL,
+  engine_version text NOT NULL,
+  generated_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE user_badges (

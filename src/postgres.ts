@@ -36,6 +36,8 @@ import type {
   TrainingSession,
   WorkoutHeartRateDetail,
   WorkoutHeartRatePoint,
+  WorkoutInsights,
+  WorkoutInsightEvidence,
   WorkoutSplit,
   WorkoutSplitsDetail
 } from "./domain.js";
@@ -465,6 +467,63 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     if (workoutIds.length === 0) return [];
     const result = await this.query("select * from workout_splits where workout_id = any($1::text[]) order by workout_id, unit, split_index", [workoutIds]);
     return [...new Set(result.rows.map((row) => row.workout_id))].map((workoutId) => mapWorkoutSplits(workoutId as string, result.rows.filter((row) => row.workout_id === workoutId)));
+  }
+
+  async workoutInsightsFor(userId: string, workoutId: string): Promise<WorkoutInsights | undefined> {
+    const owned = (await this.query("select 1 from workout_summaries where id=$1 and user_id=$2", [workoutId, userId])).rows.length;
+    if (!owned) throw new Error("Activity not found");
+    const row = (await this.query("select * from workout_insights where workout_id=$1 and user_id=$2", [workoutId, userId])).rows[0];
+    return row ? mapWorkoutInsights(row) : undefined;
+  }
+
+  async generateWorkoutInsights(userId: string, workoutId: string, force = false): Promise<WorkoutInsights> {
+    const workoutRow = (await this.query("select * from workout_summaries where id=$1 and user_id=$2", [workoutId, userId])).rows[0];
+    if (!workoutRow) throw new Error("Activity not found");
+    const workout = mapWorkout(workoutRow);
+    const splitRows = (await this.query(
+      `select * from workout_splits where workout_id=$1
+       and unit=case when exists(select 1 from workout_splits where workout_id=$1 and unit='kilometer') then 'kilometer' else 'mile' end
+       order by split_index`,
+      [workoutId]
+    )).rows;
+    const heart = (await this.query("select * from workout_heart_rate_summaries where workout_id=$1", [workoutId])).rows[0];
+    const fingerprint = [
+      workout.updatedAt,
+      splitRows.map((row) => `${row.split_index}:${row.pace_seconds_per_km}:${row.average_heart_rate_bpm ?? ""}:${row.updated_at}`).join("|"),
+      heart ? `${heart.average_bpm}:${heart.minimum_bpm}:${heart.maximum_bpm}:${heart.updated_at}` : "",
+      WORKOUT_INSIGHTS_ENGINE_VERSION
+    ].join("::");
+    if (!force) {
+      const cached = (await this.query(
+        "select * from workout_insights where workout_id=$1 and user_id=$2 and source_fingerprint=$3",
+        [workoutId, userId, fingerprint]
+      )).rows[0];
+      if (cached) return mapWorkoutInsights(cached);
+    }
+    const similar = (await this.query(
+      `select * from workout_summaries where user_id=$1 and activity_type=$2 and id<>$3 and started_at<$4
+       and ($5::double precision=0 or abs(distance_meters-$5) <= greatest(500,$5*0.2))
+       order by started_at desc limit 8`,
+      [userId, workout.activityType, workoutId, workout.startedAt, workout.distanceMeters]
+    )).rows.map(mapWorkout);
+    const generated = buildWorkoutInsights(workout, splitRows, heart, similar, fingerprint);
+    const row = (await this.query(
+      `insert into workout_insights
+       (workout_id,user_id,activity_type,headline,overview,positives,changes,suggestion,evidence,confidence,limitations,source_fingerprint,engine_version,generated_at,updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+       on conflict (workout_id) do update set activity_type=excluded.activity_type,headline=excluded.headline,
+       overview=excluded.overview,positives=excluded.positives,changes=excluded.changes,suggestion=excluded.suggestion,
+       evidence=excluded.evidence,confidence=excluded.confidence,limitations=excluded.limitations,
+       source_fingerprint=excluded.source_fingerprint,engine_version=excluded.engine_version,updated_at=excluded.updated_at
+       returning *`,
+      [
+        workoutId, userId, workout.activityType, generated.headline, generated.overview,
+        JSON.stringify(generated.positives), JSON.stringify(generated.changes), generated.suggestion,
+        JSON.stringify(generated.evidence), generated.confidence, JSON.stringify(generated.limitations),
+        fingerprint, WORKOUT_INSIGHTS_ENGINE_VERSION, generated.generatedAt
+      ]
+    )).rows[0];
+    return mapWorkoutInsights(row);
   }
 
   async seedBadges(badges: Badge[]): Promise<void> {
@@ -1346,6 +1405,31 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
           "alter table training_sessions add column if not exists target_pace_max_seconds_per_km integer",
           "alter table training_sessions add column if not exists pacing_guidance text"
         ]
+      },
+      {
+        id: "022_circle_timeline_metadata",
+        statements: [
+          "alter table feed_items add column if not exists entity_type text",
+          "alter table feed_items add column if not exists entity_id text",
+          "alter table feed_items add column if not exists metadata jsonb not null default '{}'::jsonb",
+          "alter table badges add column if not exists category text",
+          "alter table badges add column if not exists description text",
+          "alter table badges add column if not exists difficulty text not null default 'bronze'"
+        ]
+      },
+      {
+        id: "023_workout_insights",
+        statements: [
+          `create table if not exists workout_insights (
+            workout_id text primary key references workout_summaries(id) on delete cascade,
+            user_id text not null references users(id) on delete cascade,
+            activity_type text not null,headline text not null,overview text not null,
+            positives jsonb not null default '[]'::jsonb,changes jsonb not null default '[]'::jsonb,
+            suggestion text not null,evidence jsonb not null default '[]'::jsonb,confidence text not null,
+            limitations jsonb not null default '[]'::jsonb,source_fingerprint text not null,
+            engine_version text not null,generated_at timestamptz not null default now(),updated_at timestamptz not null default now())`,
+          "create index if not exists workout_insights_user_idx on workout_insights(user_id,updated_at desc)"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -1406,6 +1490,9 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     }
     for (const badge of store.userBadges.filter((item) => item.userId === userId)) {
       await this.insertUserBadge(badge);
+    }
+    for (const item of store.feed.filter((item) => item.userId === userId)) {
+      await this.insertFeedItem(item);
     }
     for (const challenge of store.challenges.filter((item) => item.participants.some((participant) => participant.userId === userId))) {
       await this.insertChallenge(challenge);
@@ -1549,8 +1636,11 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   private insertBadge(badge: Badge) {
     return this.query(
-      "insert into badges (id, title, emoji, rule_kind, threshold) values ($1, $2, $3, $4, $5) on conflict (id) do update set title = excluded.title, emoji = excluded.emoji, rule_kind = excluded.rule_kind, threshold = excluded.threshold",
-      [badge.id, badge.title, badge.emoji, badge.ruleKind, badge.threshold]
+      `insert into badges (id,title,emoji,rule_kind,threshold,category,description,difficulty)
+       values ($1,$2,$3,$4,$5,$6,$7,$8)
+       on conflict (id) do update set title=excluded.title,emoji=excluded.emoji,rule_kind=excluded.rule_kind,
+       threshold=excluded.threshold,category=excluded.category,description=excluded.description,difficulty=excluded.difficulty`,
+      [badge.id, badge.title, badge.emoji, badge.ruleKind, badge.threshold, badge.category, badge.description, badge.difficulty ?? "bronze"]
     );
   }
 
@@ -1594,8 +1684,11 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   private insertFeedItem(item: FeedItem) {
     return this.query(
-      "insert into feed_items (id, user_id, type, title, body, created_at) values ($1, $2, $3, $4, $5, $6) on conflict (id) do update set title = excluded.title, body = excluded.body",
-      [item.id, item.userId, item.type, item.title, item.body, item.createdAt]
+      `insert into feed_items (id,user_id,type,title,body,entity_type,entity_id,metadata,created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       on conflict (id) do update set title=excluded.title,body=excluded.body,entity_type=excluded.entity_type,
+       entity_id=excluded.entity_id,metadata=excluded.metadata`,
+      [item.id, item.userId, item.type, item.title, item.body, item.entityType, item.entityId, JSON.stringify(item.metadata ?? {}), item.createdAt]
     );
   }
 
@@ -1975,7 +2068,11 @@ function mapChallengeParticipant(row: any): Challenge["participants"][number] {
 }
 
 function mapFeedItem(row: any): FeedItem {
-  return { id: row.id, userId: row.user_id, type: row.type, title: row.title, body: row.body, createdAt: dateString(row.created_at), reactions: [] };
+  return {
+    id: row.id, userId: row.user_id, type: row.type, title: row.title, body: row.body,
+    entityType: row.entity_type ?? undefined, entityId: row.entity_id ?? undefined,
+    metadata: row.metadata ?? undefined, createdAt: dateString(row.created_at), reactions: []
+  };
 }
 
 function mapConversation(row: any): Conversation {
@@ -2013,11 +2110,132 @@ function mapNotification(row: any): AppNotification {
 }
 
 function mapBadge(row: any): Badge {
-  return { id: row.id, title: row.title, emoji: row.emoji, ruleKind: row.rule_kind, threshold: row.threshold };
+  return {
+    id: row.id, title: row.title, emoji: row.emoji, ruleKind: row.rule_kind, threshold: Number(row.threshold),
+    category: row.category ?? undefined, description: row.description ?? undefined, difficulty: row.difficulty ?? "bronze"
+  };
 }
 
 function mapUserBadge(row: any): UserBadge {
   return { id: row.id, userId: row.user_id, badgeId: row.badge_id, earnedAt: dateString(row.earned_at) };
+}
+
+const WORKOUT_INSIGHTS_ENGINE_VERSION = "1.0.0";
+
+function mapWorkoutInsights(row: any): WorkoutInsights {
+  return {
+    workoutId: row.workout_id, userId: row.user_id, activityType: row.activity_type,
+    headline: row.headline, overview: row.overview, positives: row.positives ?? [],
+    changes: row.changes ?? [], suggestion: row.suggestion, evidence: row.evidence ?? [],
+    confidence: row.confidence, limitations: row.limitations ?? [],
+    sourceFingerprint: row.source_fingerprint, engineVersion: row.engine_version,
+    generatedAt: dateString(row.generated_at), updatedAt: dateString(row.updated_at)
+  };
+}
+
+function buildWorkoutInsights(
+  workout: WorkoutSummary,
+  splitRows: any[],
+  heart: any | undefined,
+  similar: WorkoutSummary[],
+  fingerprint: string
+): WorkoutInsights {
+  const complete = splitRows.filter((row) => !row.is_partial);
+  const paces = complete.map((row) => Number(row.pace_seconds_per_km)).filter((value) => value > 0);
+  const positives: string[] = [];
+  const changes: string[] = [];
+  const limitations: string[] = [];
+  const evidence: WorkoutInsightEvidence[] = [];
+  let headline = "A solid activity logged";
+  let suggestion = "Keep building consistency and compare this effort with your next similar session.";
+  const averagePace = workout.distanceMeters > 0 ? workout.durationSeconds / (workout.distanceMeters / 1000) : undefined;
+  if (workout.activityType === "strengthTraining") {
+    headline = workout.durationSeconds >= 3600 ? "A substantial strength session" : "Strength work completed";
+    positives.push(`You completed ${Math.round(workout.durationSeconds / 60)} minutes of strength training.`);
+    evidence.push({ key: "duration", label: "Duration", value: `${Math.round(workout.durationSeconds / 60)} min`, category: "observed" });
+    if (heart) {
+      positives.push(`Your average heart rate was ${Math.round(Number(heart.average_bpm))} bpm.`);
+      evidence.push({ key: "heartRate", label: "Average heart rate", value: `${Math.round(Number(heart.average_bpm))} bpm`, category: "observed" });
+    } else limitations.push("Heart-rate data was unavailable for this session.");
+    if (similar.length) {
+      const averageDuration = similar.reduce((sum, item) => sum + item.durationSeconds, 0) / similar.length;
+      changes.push(workout.durationSeconds >= averageDuration
+        ? "This session was longer than your recent strength-session average."
+        : "This was a shorter session than your recent strength-session average.");
+    }
+    suggestion = "Keep your weekly strength frequency consistent and allow enough recovery before another demanding session.";
+  } else {
+    const activity = workout.activityType === "running" ? "run" : "walk";
+    if (averagePace) {
+      positives.push(`You averaged ${formatPace(averagePace)} per kilometre across this ${activity}.`);
+      evidence.push({ key: "averagePace", label: "Average pace", value: `${formatPace(averagePace)} /km`, category: "observed" });
+    }
+    if (paces.length >= 2) {
+      const fastest = Math.min(...paces);
+      const slowest = Math.max(...paces);
+      const fastestIndex = paces.indexOf(fastest) + 1;
+      const slowestIndex = paces.indexOf(slowest) + 1;
+      const finalChange = paces.at(-1)! - paces[0];
+      const variation = slowest - fastest;
+      evidence.push({ key: "fastestSplit", label: "Fastest split", value: `${formatPace(fastest)} /km`, splitIndex: fastestIndex, category: "observed" });
+      evidence.push({ key: "slowestSplit", label: "Slowest split", value: `${formatPace(slowest)} /km`, splitIndex: slowestIndex, category: "observed" });
+      if (variation <= 3) {
+        headline = "Exceptionally even pacing";
+        positives.push(`Your complete splits stayed within ${Math.round(variation)} seconds per kilometre.`);
+      } else if (finalChange >= 10) {
+        headline = "Strong opening, tougher finish";
+        changes.push(`Your final complete split was ${Math.round(finalChange)} seconds per kilometre slower than your first.`);
+        suggestion = `Start the next ${activity} a few seconds per kilometre more conservatively and aim to keep the final split close to the opening pace.`;
+      } else if (finalChange <= -10) {
+        headline = "A strong finish";
+        positives.push(`Your final complete split was ${Math.round(Math.abs(finalChange))} seconds per kilometre faster than your first.`);
+        suggestion = "Use this controlled progression as a reference for your next similar effort.";
+      } else {
+        headline = "Controlled pacing";
+        positives.push(`Your opening and closing pace differed by only ${Math.round(Math.abs(finalChange))} seconds per kilometre.`);
+      }
+      const firstHeart = complete[0]?.average_heart_rate_bpm == null ? undefined : Number(complete[0].average_heart_rate_bpm);
+      const finalHeart = complete.at(-1)?.average_heart_rate_bpm == null ? undefined : Number(complete.at(-1).average_heart_rate_bpm);
+      if (firstHeart != null && finalHeart != null) {
+        const heartChange = Math.round(finalHeart - firstHeart);
+        evidence.push({ key: "heartRateChange", label: "Split heart-rate change", value: `${heartChange >= 0 ? "+" : ""}${heartChange} bpm`, splitIndex: complete.length, category: "observed" });
+        if (heartChange >= 5 && finalChange >= 5) {
+          changes.push(`Heart rate increased by ${heartChange} bpm as pace slowed. Increasing effort may have contributed, although heart-rate data alone cannot confirm the cause.`);
+        } else if (heartChange >= 5) {
+          positives.push(`You maintained pace while split heart rate rose by ${heartChange} bpm.`);
+        }
+      } else limitations.push("Per-split heart-rate data was unavailable.");
+    } else {
+      limitations.push("Not enough complete splits were available for pacing-pattern analysis.");
+    }
+    if (similar.length && averagePace) {
+      const comparable = similar.filter((item) => item.distanceMeters > 0);
+      if (comparable.length) {
+        const recentPace = comparable.reduce((sum, item) => sum + item.durationSeconds / (item.distanceMeters / 1000), 0) / comparable.length;
+        const delta = Math.round(recentPace - averagePace);
+        if (Math.abs(delta) >= 3) {
+          const text = delta > 0
+            ? `This was ${Math.abs(delta)} seconds per kilometre faster than your recent similar-${activity} average.`
+            : `This was ${Math.abs(delta)} seconds per kilometre slower than your recent similar-${activity} average.`;
+          (delta > 0 ? positives : changes).push(text);
+          evidence.push({ key: "recentComparison", label: "Recent comparison", value: `${delta > 0 ? "" : "+"}${-delta}s /km`, category: "observed" });
+        }
+      }
+    } else limitations.push(`No earlier comparable ${activity}s were available.`);
+  }
+  const confidence: WorkoutInsights["confidence"] = paces.length >= 2 && (heart || workout.activityType === "strengthTraining") ? "high" : positives.length >= 2 ? "moderate" : "limited";
+  const overview = [...positives.slice(0, 1), ...changes.slice(0, 1)].join(" ") || "HansUp recorded this activity and will provide richer comparisons as more data becomes available.";
+  return {
+    workoutId: workout.id, userId: workout.userId, activityType: workout.activityType,
+    headline, overview, positives, changes, suggestion, evidence, confidence, limitations,
+    sourceFingerprint: fingerprint, engineVersion: WORKOUT_INSIGHTS_ENGINE_VERSION,
+    generatedAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+  };
+}
+
+function formatPace(seconds: number): string {
+  const rounded = Math.max(0, Math.round(seconds));
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
 function dateString(value: unknown): string {

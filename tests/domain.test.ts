@@ -299,8 +299,8 @@ test("tracks independent streaks and projects the selected home goal", () => {
   assert.equal(store.goalStreaks.find((item) => item.goalId === stepGoal.id)?.currentCount, 3);
   assert.equal(store.goalStreaks.find((item) => item.goalId === activeGoal.id)?.currentCount, 1);
   assert.equal(store.streaks.find((item) => item.userId === "u_1")?.currentDays, 1);
-  assert.ok(store.notifications.some((item) => item.type === "streak" && item.entityId === stepGoal.id && item.body.includes("3-day Steps streak")));
-  assert.ok(store.messages.some((item) => item.kind === "system" && item.body.includes("3-day Steps streak")));
+  assert.equal(store.notifications.some((item) => item.type === "streak" && item.entityId === stepGoal.id), false);
+  assert.equal(store.messages.some((item) => item.kind === "system" && item.body.includes("Steps streak")), false);
   const history = goalHistory(store, "u_1", activeGoal.id, addLocalDays(today, -2), today);
   assert.deepEqual(history.entries.map((item) => item.value), [40, 0, 40]);
 });
