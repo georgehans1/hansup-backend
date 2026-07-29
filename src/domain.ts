@@ -3,7 +3,9 @@ export type ID = string;
 export type ActivityKind = "steps" | "distance" | "walking" | "running" | "strengthTraining" | "activeMinutes" | "calories";
 export type GoalCadence = "daily" | "weekly";
 export type PerformanceGoalStatus = "active" | "completed" | "abandoned" | "archived";
-export type TrainingSessionStatus = "scheduled" | "completed" | "skipped";
+export type TrainingSessionStatus = "scheduled" | "completed" | "partial" | "skipped" | "superseded";
+export type TrainingSessionType = "easy" | "recovery" | "tempo" | "intervals" | "longRun" | "progression" | "timeTrial";
+export type PerformanceEffortFeedback = "easy" | "onTarget" | "hard";
 export type ChallengeStatus = "inviting" | "active" | "completed";
 export type ChallengeTemplate =
   | "weekly_steps"
@@ -140,6 +142,8 @@ export interface PerformanceGoal {
   consentVersion: string;
   baselineSeconds?: number;
   baselineWorkoutId?: ID;
+  currentBenchmarkSeconds?: number;
+  currentBenchmarkWorkoutId?: ID;
   analysis: PerformanceGoalAnalysis;
   createdAt: string;
   updatedAt: string;
@@ -157,6 +161,8 @@ export interface TrainingSession {
   effort: string;
   status: TrainingSessionStatus;
   linkedWorkoutId?: ID;
+  quality?: "targetMet" | "completed" | "partial";
+  matchConfidence?: number;
 }
 
 export interface TrainingPlan {
@@ -169,6 +175,7 @@ export interface TrainingPlan {
   recoveryGuidance: string;
   caution: string;
   generatedAt: string;
+  status?: "active" | "superseded";
   sessions: TrainingSession[];
 }
 
@@ -176,6 +183,56 @@ export interface PerformanceGoalDetail {
   goal: PerformanceGoal;
   plan?: TrainingPlan;
   milestones: PerformanceGoalMilestone[];
+  trajectory?: PerformanceGoalTrajectory;
+  pendingAdaptation?: PerformanceGoalAdaptation;
+}
+
+export interface PerformanceGoalTrajectory {
+  originalBaselineSeconds?: number;
+  currentBenchmarkSeconds?: number;
+  improvementSeconds: number;
+  remainingGapSeconds?: number;
+  elapsedPercent: number;
+  improvementPercent: number;
+  expectedImprovementPercent: number;
+  adherencePercent: number;
+  completedSessions: number;
+  totalSessions: number;
+  status: "awaitingData" | "behind" | "onTrack" | "ahead" | "achieved";
+}
+
+export interface PerformanceGoalEvidence {
+  id: ID;
+  performanceGoalId: ID;
+  workout: WorkoutSummary;
+  trainingSessionId?: ID;
+  kind: "benchmark" | "session" | "relevantRun";
+  matchStatus: "automatic" | "confirmed" | "ambiguous" | "unmatched";
+  quality?: "targetMet" | "completed" | "partial";
+  matchConfidence?: number;
+  impactSummary: string;
+  createdAt: string;
+  effortFeedback?: PerformanceEffortFeedback;
+  note?: string;
+}
+
+export interface PerformanceQualifyingRun {
+  workout: WorkoutSummary;
+  qualifiesBenchmark: boolean;
+  reason: string;
+  matchingSessionIds: ID[];
+  alreadyLinked: boolean;
+}
+
+export interface PerformanceGoalAdaptation {
+  id: ID;
+  performanceGoalId: ID;
+  reason: string;
+  explanation: string;
+  status: "recommended" | "pending" | "accepted" | "declined" | "expired";
+  proposedPlan?: Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt">;
+  createdAt: string;
+  decidedAt?: string;
 }
 
 export interface PerformanceGoalMilestone {

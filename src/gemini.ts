@@ -1,7 +1,7 @@
 import type { PerformanceGoalDetail, TrainingPlan, TrainingSession } from "./domain.js";
 import type { ProductionConfig } from "./config.js";
 
-type PlanDraft = Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt" | "sessions"> & {
+export type PlanDraft = Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt" | "sessions"> & {
   sessions: Array<Omit<TrainingSession, "id" | "planId" | "status">>;
 };
 
@@ -16,10 +16,12 @@ export async function generateGeminiPlan(config: ProductionConfig, detail: Perfo
       preferredLongRunDay: detail.goal.preferredLongRunDay
     },
     analysis: detail.goal.analysis,
+    trajectory: detail.trajectory,
     instructions: [
       "Create a conservative running plan based only on the supplied facts.",
       "Do not diagnose injuries or provide medical treatment.",
-      "Return JSON only. Schedule sessions from today through no more than the next 28 days.",
+      "Return JSON only. Create one rolling block covering no more than the next 28 days.",
+      "Session type must be exactly one of easy, recovery, tempo, intervals, longRun, progression, or timeTrial.",
       "Use ISO YYYY-MM-DD dates. Include recovery days implicitly, not as sessions."
     ]
   };
@@ -47,7 +49,7 @@ export async function generateGeminiPlan(config: ProductionConfig, detail: Perfo
                   required: ["scheduledDate", "type", "title", "purpose", "effort"],
                   properties: {
                     scheduledDate: { type: "STRING" },
-                    type: { type: "STRING" },
+                    type: { type: "STRING", enum: ["easy", "recovery", "tempo", "intervals", "longRun", "progression", "timeTrial"] },
                     title: { type: "STRING" },
                     purpose: { type: "STRING" },
                     distanceMeters: { type: "NUMBER" },
@@ -76,8 +78,9 @@ function validatePlan(plan: PlanDraft) {
     throw new Error("Coach returned an incomplete plan");
   }
   if (plan.sessions.length > 28) throw new Error("Coach returned too many sessions");
+  const validTypes = new Set(["easy", "recovery", "tempo", "intervals", "longRun", "progression", "timeTrial"]);
   for (const session of plan.sessions) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(session.scheduledDate) || !session.title || !session.purpose || !session.effort) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(session.scheduledDate) || !validTypes.has(session.type) || !session.title || !session.purpose || !session.effort) {
       throw new Error("Coach returned an invalid session");
     }
   }

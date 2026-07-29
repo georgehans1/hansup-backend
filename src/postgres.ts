@@ -21,7 +21,22 @@ import {
   UserSettings,
   WorkoutSummary
 } from "./domain.js";
-import type { PerformanceGoal, PerformanceGoalAnalysis, PerformanceGoalDetail, TrainingPlan, TrainingSession, WorkoutHeartRateDetail, WorkoutHeartRatePoint, WorkoutSplit, WorkoutSplitsDetail } from "./domain.js";
+import type {
+  PerformanceEffortFeedback,
+  PerformanceGoal,
+  PerformanceGoalAdaptation,
+  PerformanceGoalAnalysis,
+  PerformanceGoalDetail,
+  PerformanceGoalEvidence,
+  PerformanceGoalTrajectory,
+  PerformanceQualifyingRun,
+  TrainingPlan,
+  TrainingSession,
+  WorkoutHeartRateDetail,
+  WorkoutHeartRatePoint,
+  WorkoutSplit,
+  WorkoutSplitsDetail
+} from "./domain.js";
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 type TransactionFn = (work: (query: QueryFn) => Promise<void>) => Promise<void>;
@@ -493,10 +508,18 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       };
     }
     await this.query(
-      `insert into performance_goals (id,user_id,distance_meters,target_seconds,target_date,training_days_per_week,preferred_long_run_day,status,consent_version,baseline_seconds,baseline_workout_id,analysis)
-       values ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11)`,
+      `insert into performance_goals
+       (id,user_id,distance_meters,target_seconds,target_date,training_days_per_week,preferred_long_run_day,status,consent_version,baseline_seconds,baseline_workout_id,current_benchmark_seconds,current_benchmark_workout_id,analysis)
+       values ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$9,$10,$11)`,
       [id, userId, input.distanceMeters, input.targetSeconds, input.targetDate, input.trainingDaysPerWeek, input.preferredLongRunDay, input.consentVersion, baselineSeconds ?? null, input.baselineWorkoutId ?? null, JSON.stringify(analysis)]
     );
+    if (baselineSeconds != null && input.baselineWorkoutId) {
+      await this.query(
+        `insert into performance_goal_benchmarks (id,performance_goal_id,workout_id,seconds,kind)
+         values ($1,$2,$3,$4,'original'),($5,$2,$3,$4,'current') on conflict do nothing`,
+        [generatedId("pgb"), id, input.baselineWorkoutId, baselineSeconds, generatedId("pgb")]
+      );
+    }
     const milestoneBaselineSeconds = baselineSeconds ?? Math.round(input.targetSeconds * 1.2);
     const start = new Date();
     const end = new Date(`${input.targetDate}T12:00:00Z`);
@@ -522,10 +545,211 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     return this.performanceGoalDetailFromRow(row);
   }
 
+  async updatePerformanceGoal(userId: string, goalId: string, patch: {
+    status?: string; targetSeconds?: number; targetDate?: string; trainingDaysPerWeek?: number; preferredLongRunDay?: number;
+  }): Promise<PerformanceGoalDetail> {
+    if (patch.status) return this.updatePerformanceGoalStatus(userId, goalId, patch.status);
+    if (patch.targetSeconds != null && patch.targetSeconds <= 0) throw new Error("Invalid target time");
+    if (patch.trainingDaysPerWeek != null && (patch.trainingDaysPerWeek < 2 || patch.trainingDaysPerWeek > 7)) throw new Error("Invalid training days");
+    const row = (await this.query(
+      `update performance_goals set
+       target_seconds=coalesce($1,target_seconds),target_date=coalesce($2,target_date),
+       training_days_per_week=coalesce($3,training_days_per_week),
+       preferred_long_run_day=coalesce($4,preferred_long_run_day),updated_at=now()
+       where id=$5 and user_id=$6 and status='active' returning *`,
+      [patch.targetSeconds ?? null, patch.targetDate ?? null, patch.trainingDaysPerWeek ?? null, patch.preferredLongRunDay ?? null, goalId, userId]
+    )).rows[0];
+    if (!row) throw new Error("Active performance goal not found");
+    return this.refreshPerformanceGoalAnalysis(userId, goalId);
+  }
+
+  async qualifyingRunsFor(userId: string, goalId: string): Promise<PerformanceQualifyingRun[]> {
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail) throw new Error("Performance goal not found");
+    const tolerance = Math.max(75, detail.goal.distanceMeters * 0.015);
+    const rows = (await this.query(
+      `select w.*,
+       exists(select 1 from performance_goal_evidence e where e.performance_goal_id = $2 and e.workout_id = w.id) as already_linked
+       from workout_summaries w
+       where w.user_id = $1 and w.activity_type = 'running'
+       order by w.started_at desc limit 60`,
+      [userId, goalId]
+    )).rows;
+    const sessions = detail.plan?.sessions.filter((item) => item.status === "scheduled") ?? [];
+    return rows.map((row) => {
+      const workout = mapWorkout(row);
+      const qualifiesBenchmark = Math.abs(workout.distanceMeters - detail.goal.distanceMeters) <= tolerance;
+      const matchingSessionIds = sessions.filter((session) => sessionMatchScore(session, workout) >= 0.65).map((session) => session.id);
+      return {
+        workout,
+        qualifiesBenchmark,
+        reason: qualifiesBenchmark
+          ? `Explicit ${formatDistance(detail.goal.distanceMeters)} run within the qualifying distance range`
+          : matchingSessionIds.length ? "Useful preparation run that can be linked to a training session" : "Does not match the goal distance or a current session",
+        matchingSessionIds,
+        alreadyLinked: Boolean(row.already_linked)
+      };
+    });
+  }
+
+  async setCurrentPerformanceBenchmark(userId: string, goalId: string, workoutId: string): Promise<PerformanceGoalDetail> {
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail || detail.goal.status !== "active") throw new Error("Active performance goal not found");
+    const tolerance = Math.max(75, detail.goal.distanceMeters * 0.015);
+    const workout = (await this.query(
+      `select * from workout_summaries where id = $1 and user_id = $2 and activity_type = 'running'
+       and abs(distance_meters - $3) <= $4`,
+      [workoutId, userId, detail.goal.distanceMeters, tolerance]
+    )).rows[0];
+    if (!workout) throw new Error("Selected run does not qualify as a benchmark");
+    const seconds = Math.round(Number(workout.duration_seconds));
+    await this.transaction(async (query) => {
+      await query(
+        "update performance_goals set current_benchmark_seconds = $1,current_benchmark_workout_id = $2,updated_at = now() where id = $3",
+        [seconds, workoutId, goalId]
+      );
+      await query(
+        `insert into performance_goal_benchmarks (id,performance_goal_id,workout_id,seconds,kind)
+         values ($1,$2,$3,$4,'current') on conflict do nothing`,
+        [generatedId("pgb"), goalId, workoutId, seconds]
+      );
+    });
+    return this.refreshPerformanceGoalAnalysis(userId, goalId);
+  }
+
+  async performanceEvidenceFor(userId: string, goalId: string): Promise<PerformanceGoalEvidence[]> {
+    if (!(await this.performanceGoalFor(userId, goalId))) throw new Error("Performance goal not found");
+    const rows = (await this.query(
+      `select e.*,w.*,e.id as evidence_id,e.created_at as evidence_created_at,
+       c.effort_feedback,c.note
+       from performance_goal_evidence e
+       join workout_summaries w on w.id = e.workout_id
+       left join performance_run_checkins c on c.performance_goal_id = e.performance_goal_id and c.workout_id = e.workout_id
+       where e.performance_goal_id = $1 order by e.created_at desc`,
+      [goalId]
+    )).rows;
+    return rows.map((row) => ({
+      id: row.evidence_id,
+      performanceGoalId: goalId,
+      workout: mapWorkout(row),
+      trainingSessionId: row.training_session_id ?? undefined,
+      kind: row.kind,
+      matchStatus: row.match_status,
+      quality: row.quality ?? undefined,
+      matchConfidence: row.match_confidence == null ? undefined : Number(row.match_confidence),
+      impactSummary: row.impact_summary,
+      createdAt: dateString(row.evidence_created_at),
+      effortFeedback: row.effort_feedback ?? undefined,
+      note: row.note ?? undefined
+    }));
+  }
+
+  async checkInPerformanceRun(userId: string, goalId: string, input: {
+    workoutId: string; effortFeedback?: PerformanceEffortFeedback; note?: string; trainingSessionId?: string;
+  }): Promise<PerformanceGoalDetail> {
+    const note = input.note?.trim().slice(0, 500);
+    if (input.effortFeedback && !["easy", "onTarget", "hard"].includes(input.effortFeedback)) throw new Error("Invalid effort feedback");
+    await this.query(
+      `insert into performance_run_checkins (performance_goal_id,workout_id,effort_feedback,note)
+       select $1,$2,$3,$4 where exists(select 1 from performance_goals where id = $1 and user_id = $5)
+       on conflict (performance_goal_id,workout_id) do update set effort_feedback = excluded.effort_feedback,note = excluded.note,created_at = now()`,
+      [goalId, input.workoutId, input.effortFeedback ?? null, note ?? null, userId]
+    );
+    await this.evaluateWorkoutForGoal(userId, goalId, input.workoutId, input.trainingSessionId, true);
+    return this.refreshPerformanceGoalAnalysis(userId, goalId);
+  }
+
+  async evaluateNewPerformanceWorkouts(userId: string, workoutIds: string[]): Promise<void> {
+    const goals = (await this.query("select id from performance_goals where user_id = $1 and status = 'active'", [userId])).rows;
+    for (const goal of goals) {
+      for (const workoutId of workoutIds) await this.evaluateWorkoutForGoal(userId, goal.id, workoutId);
+      await this.refreshPerformanceGoalAnalysis(userId, goal.id);
+      await this.recommendAdaptation(userId, goal.id, "workoutSync");
+    }
+  }
+
+  async evaluatePerformanceGoal(userId: string, goalId: string, reason = "userRequested"): Promise<PerformanceGoalAdaptation | undefined> {
+    await this.refreshPerformanceGoalAnalysis(userId, goalId);
+    return this.recommendAdaptation(userId, goalId, reason);
+  }
+
+  async adaptationsFor(userId: string, goalId: string): Promise<PerformanceGoalAdaptation[]> {
+    if (!(await this.performanceGoalFor(userId, goalId))) throw new Error("Performance goal not found");
+    return (await this.query("select * from performance_goal_adaptations where performance_goal_id = $1 order by created_at desc", [goalId])).rows.map(mapAdaptation);
+  }
+
+  async attachAdaptationDraft(userId: string, goalId: string, adaptationId: string, proposedPlan: unknown): Promise<PerformanceGoalAdaptation> {
+    const row = (await this.query(
+      `update performance_goal_adaptations a set proposed_plan = $1,status = 'pending'
+       from performance_goals g where a.performance_goal_id = g.id and a.id = $2 and g.id = $3 and g.user_id = $4
+       and a.status in ('recommended','pending') returning a.*`,
+      [JSON.stringify(proposedPlan), adaptationId, goalId, userId]
+    )).rows[0];
+    if (!row) throw new Error("Adaptation not found");
+    return mapAdaptation(row);
+  }
+
+  async acceptAdaptation(userId: string, goalId: string, adaptationId: string, model: string): Promise<PerformanceGoalDetail> {
+    const adaptation = (await this.query(
+      `select a.* from performance_goal_adaptations a join performance_goals g on g.id = a.performance_goal_id
+       where a.id = $1 and a.performance_goal_id = $2 and g.user_id = $3 and a.status = 'pending'`,
+      [adaptationId, goalId, userId]
+    )).rows[0];
+    if (!adaptation?.proposed_plan) throw new Error("Adaptation has no proposed plan");
+    await this.saveTrainingPlan(goalId, model, adaptation.proposed_plan, true);
+    await this.query(
+      "update performance_goal_adaptations set status = 'accepted',decided_at = now() where id = $1",
+      [adaptationId]
+    );
+    return (await this.performanceGoalFor(userId, goalId))!;
+  }
+
+  async declineAdaptation(userId: string, goalId: string, adaptationId: string): Promise<PerformanceGoalAdaptation> {
+    const row = (await this.query(
+      `update performance_goal_adaptations a set status = 'declined',decided_at = now()
+       from performance_goals g where a.performance_goal_id = g.id and a.id = $1 and g.id = $2 and g.user_id = $3
+       and a.status in ('recommended','pending') returning a.*`,
+      [adaptationId, goalId, userId]
+    )).rows[0];
+    if (!row) throw new Error("Adaptation not found");
+    return mapAdaptation(row);
+  }
+
+  async linkWorkoutToTrainingSession(userId: string, sessionId: string, workoutId: string): Promise<TrainingSession> {
+    const ownership = (await this.query(
+      `select s.*,g.id as goal_id from training_sessions s join training_plans p on p.id=s.plan_id
+       join performance_goals g on g.id=p.performance_goal_id where s.id=$1 and g.user_id=$2`,
+      [sessionId, userId]
+    )).rows[0];
+    if (!ownership) throw new Error("Training session not found");
+    await this.evaluateWorkoutForGoal(userId, ownership.goal_id, workoutId, sessionId, true);
+    const row = (await this.query("select * from training_sessions where id = $1", [sessionId])).rows[0];
+    return mapTrainingSession(row);
+  }
+
+  async unlinkWorkoutFromTrainingSession(userId: string, sessionId: string): Promise<TrainingSession> {
+    const row = (await this.query(
+      `update training_sessions s set linked_workout_id=null,status='scheduled',quality=null,match_confidence=null
+       from training_plans p join performance_goals g on g.id=p.performance_goal_id
+       where s.plan_id=p.id and s.id=$1 and g.user_id=$2 returning s.*`,
+      [sessionId, userId]
+    )).rows[0];
+    if (!row) throw new Error("Training session not found");
+    await this.query("delete from performance_goal_evidence where training_session_id = $1", [sessionId]);
+    return mapTrainingSession(row);
+  }
+
   async refreshPerformanceGoalAnalysis(userId: string, goalId: string): Promise<PerformanceGoalDetail> {
     const detail = await this.performanceGoalFor(userId, goalId);
     if (!detail) throw new Error("Performance goal not found");
-    const analysis = await this.performanceAnalysis(userId, detail.goal.distanceMeters, detail.goal.targetSeconds, detail.goal.createdAt, detail.goal.baselineSeconds, detail.goal.baselineWorkoutId);
+    const analysis = await this.performanceAnalysis(
+      userId,
+      detail.goal.distanceMeters,
+      detail.goal.targetSeconds,
+      detail.goal.createdAt,
+      detail.goal.currentBenchmarkSeconds ?? detail.goal.baselineSeconds,
+      detail.goal.currentBenchmarkWorkoutId ?? detail.goal.baselineWorkoutId
+    );
     if (analysis.currentBestSeconds != null) {
       await this.query(
         `update performance_goal_milestones set status = 'completed', completed_workout_id = $1
@@ -537,19 +761,49 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       "update performance_goal_milestones set status = 'missed' where performance_goal_id = $1 and status = 'pending' and target_date < current_date",
       [goalId]
     );
-    const row = (await this.query("update performance_goals set analysis = $1, updated_at = now() where id = $2 returning *", [JSON.stringify(analysis), goalId])).rows[0];
+    const row = (await this.query(
+      `update performance_goals set analysis = $1,
+       current_benchmark_seconds = coalesce($2,current_benchmark_seconds),
+       current_benchmark_workout_id = coalesce($3,current_benchmark_workout_id),
+       updated_at = now() where id = $4 returning *`,
+      [JSON.stringify(analysis), analysis.currentBestSeconds ?? null, analysis.qualifyingWorkoutId ?? null, goalId]
+    )).rows[0];
+    if (analysis.currentBestSeconds != null && analysis.qualifyingWorkoutId) {
+      await this.query(
+        `insert into performance_goal_benchmarks (id,performance_goal_id,workout_id,seconds,kind)
+         values ($1,$2,$3,$4,'current') on conflict do nothing`,
+        [generatedId("pgb"), goalId, analysis.qualifyingWorkoutId, analysis.currentBestSeconds]
+      );
+    }
+    const completedMilestones = (await this.query(
+      "select id,sequence,completed_workout_id from performance_goal_milestones where performance_goal_id=$1 and status='completed'",
+      [goalId]
+    )).rows;
+    for (const milestone of completedMilestones) {
+      await this.insertPerformanceNotification(
+        userId, goalId, "Milestone reached",
+        `You completed milestone ${milestone.sequence} on the way to your performance target.`,
+        `performance-milestone:${milestone.id}`
+      );
+    }
     return this.performanceGoalDetailFromRow(row);
   }
 
-  async saveTrainingPlan(goalId: string, model: string, content: Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt" | "sessions"> & { sessions: Array<Omit<TrainingSession, "id" | "planId" | "status">> }): Promise<TrainingPlan> {
+  async saveTrainingPlan(goalId: string, model: string, content: Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt" | "sessions"> & { sessions: Array<Omit<TrainingSession, "id" | "planId" | "status">> }, bypassCooldown = false): Promise<TrainingPlan> {
     const latest = (await this.query("select generated_at from training_plans where performance_goal_id = $1 order by version desc limit 1", [goalId])).rows[0];
-    if (latest && Date.now() - Date.parse(latest.generated_at) < 15 * 60_000) throw new Error("Your plan was updated recently. Try again in a few minutes.");
+    if (!bypassCooldown && latest && Date.now() - Date.parse(latest.generated_at) < 15 * 60_000) throw new Error("Your plan was updated recently. Try again in a few minutes.");
     const version = Number((await this.query("select coalesce(max(version),0)+1 as version from training_plans where performance_goal_id = $1", [goalId])).rows[0].version);
     const planId = generatedId("tp");
     await this.transaction(async (query) => {
+      await query("update training_plans set status = 'superseded' where performance_goal_id = $1 and status = 'active'", [goalId]);
       await query(
-        `insert into training_plans (id,performance_goal_id,version,model,summary,gap_explanation,recovery_guidance,caution)
-         values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `update training_sessions set status = 'superseded' where status = 'scheduled'
+         and plan_id in (select id from training_plans where performance_goal_id = $1)`,
+        [goalId]
+      );
+      await query(
+        `insert into training_plans (id,performance_goal_id,version,model,summary,gap_explanation,recovery_guidance,caution,status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,'active')`,
         [planId, goalId, version, model, content.summary, content.gapExplanation, content.recoveryGuidance, content.caution]
       );
       for (const session of content.sessions) {
@@ -564,7 +818,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   }
 
   async updateTrainingSession(userId: string, sessionId: string, patch: { scheduledDate?: string; status?: string }): Promise<TrainingSession> {
-    if (patch.status && !["scheduled", "completed", "skipped"].includes(patch.status)) throw new Error("Invalid session status");
+    if (patch.status && !["scheduled", "completed", "partial", "skipped"].includes(patch.status)) throw new Error("Invalid session status");
     const row = (await this.query(
       `update training_sessions s set scheduled_date = coalesce($1, s.scheduled_date), status = coalesce($2, s.status)
        from training_plans p join performance_goals g on g.id = p.performance_goal_id
@@ -603,7 +857,126 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     );
   }
 
-  private async performanceAnalysis(userId: string, distanceMeters: number, targetSeconds: number, since?: string, baselineSeconds?: number, baselineWorkoutId?: string): Promise<PerformanceGoalAnalysis> {
+  private async evaluateWorkoutForGoal(userId: string, goalId: string, workoutId: string, selectedSessionId?: string, confirmed = false): Promise<void> {
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail || detail.goal.status !== "active") return;
+    const row = (await this.query(
+      "select * from workout_summaries where id=$1 and user_id=$2 and activity_type='running'",
+      [workoutId, userId]
+    )).rows[0];
+    if (!row) return;
+    const workout = mapWorkout(row);
+    const goalTolerance = Math.max(75, detail.goal.distanceMeters * 0.015);
+    const isBenchmark = Math.abs(workout.distanceMeters - detail.goal.distanceMeters) <= goalTolerance;
+    const candidates = (detail.plan?.sessions ?? [])
+      .filter((item) => item.status === "scheduled" && (!selectedSessionId || item.id === selectedSessionId))
+      .map((session) => ({ session, score: sessionMatchScore(session, workout) }))
+      .filter((item) => item.score >= 0.65)
+      .sort((a, b) => b.score - a.score);
+    const unambiguous = selectedSessionId ? candidates[0] : candidates.length === 1 || (candidates[0] && candidates[1] && candidates[0].score - candidates[1].score >= 0.15) ? candidates[0] : undefined;
+    const session = unambiguous?.session;
+    const confidence = unambiguous?.score;
+    const quality = session ? sessionQuality(session, workout) : undefined;
+    const kind = isBenchmark ? "benchmark" : session ? "session" : "relevantRun";
+    const matchStatus = session ? (confirmed ? "confirmed" : "automatic") : candidates.length > 1 ? "ambiguous" : "unmatched";
+    const impactSummary = isBenchmark
+      ? `${formatDistance(detail.goal.distanceMeters)} benchmark completed in ${formatDuration(Math.round(workout.durationSeconds))}`
+      : session ? `${session.title} ${quality === "targetMet" ? "met its target" : quality === "partial" ? "was partially completed" : "was completed"}`
+      : `Run added to the goal's recent training evidence`;
+    await this.query(
+      `insert into performance_goal_evidence
+       (id,performance_goal_id,workout_id,training_session_id,kind,match_status,quality,match_confidence,impact_summary)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       on conflict (performance_goal_id,workout_id) do update set
+       training_session_id=excluded.training_session_id,kind=excluded.kind,match_status=excluded.match_status,
+       quality=excluded.quality,match_confidence=excluded.match_confidence,impact_summary=excluded.impact_summary`,
+      [generatedId("pge"), goalId, workoutId, session?.id ?? null, kind, matchStatus, quality ?? null, confidence ?? null, impactSummary]
+    );
+    if (session) {
+      await this.query(
+        "update training_sessions set linked_workout_id=$1,status=$2,quality=$3,match_confidence=$4 where id=$5 and status='scheduled'",
+        [workoutId, quality === "partial" ? "partial" : "completed", quality, confidence, session.id]
+      );
+    }
+    if (matchStatus === "ambiguous") {
+      await this.insertPerformanceNotification(
+        userId, goalId, "Which session was this?",
+        "A recent run could match more than one planned session. Open your goal to confirm it.",
+        `performance-ambiguous:${goalId}:${workoutId}`
+      );
+    } else if (isBenchmark && workout.durationSeconds < (detail.goal.currentBenchmarkSeconds ?? Number.MAX_SAFE_INTEGER)) {
+      await this.insertPerformanceNotification(
+        userId, goalId, "New performance benchmark",
+        `${formatDistance(detail.goal.distanceMeters)} is now ${formatDuration(Math.round(workout.durationSeconds))}.`,
+        `performance-benchmark:${goalId}:${workoutId}`
+      );
+    } else if (session) {
+      await this.insertPerformanceNotification(
+        userId, goalId, "Training run linked",
+        impactSummary,
+        `performance-session-linked:${goalId}:${workoutId}`
+      );
+    }
+  }
+
+  private async recommendAdaptation(userId: string, goalId: string, reason: string): Promise<PerformanceGoalAdaptation | undefined> {
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail || detail.goal.status !== "active") return undefined;
+    const existing = await this.latestAdaptation(goalId, ["recommended", "pending"]);
+    if (existing && Date.now() - Date.parse(existing.createdAt) < 7 * 86_400_000) return existing;
+    const latestDecision = await this.latestAdaptation(goalId);
+    if (latestDecision && Date.now() - Date.parse(latestDecision.createdAt) < 7 * 86_400_000) return undefined;
+    const original = detail.goal.baselineSeconds;
+    const current = detail.goal.currentBenchmarkSeconds ?? detail.goal.analysis.currentBestSeconds;
+    const improvement = original != null && current != null ? original - current : 0;
+    const missed = detail.plan?.sessions.filter((item) => item.status === "skipped").length ?? 0;
+    const targetAchieved = current != null && current <= detail.goal.targetSeconds;
+    const majorImprovement = original != null && improvement >= Math.max(15, original * 0.02);
+    const weeklyDue = !existing && reason === "weeklyReview";
+    if (!targetAchieved && !majorImprovement && missed < 2 && !weeklyDue && reason !== "userRequested") return undefined;
+    const adaptationReason = targetAchieved ? "targetAchieved" : majorImprovement ? "newBenchmark" : missed >= 2 ? "missedSessions" : reason;
+    const explanation = targetAchieved
+      ? "You reached the target early. Review a maintenance block or choose a new target."
+      : majorImprovement
+        ? `Your current benchmark improved by ${formatDuration(improvement)}. A revised block can reflect your new fitness.`
+        : missed >= 2
+          ? "Recent missed sessions suggest the remaining block should be rebalanced."
+          : "Your weekly coaching review is ready.";
+    const row = (await this.query(
+      `insert into performance_goal_adaptations (id,performance_goal_id,reason,explanation,status)
+       values ($1,$2,$3,$4,'recommended') returning *`,
+      [generatedId("pga"), goalId, adaptationReason, explanation]
+    )).rows[0];
+    await this.query(
+      `insert into notifications
+       (id,user_id,type,entity_type,entity_id,title,body,metadata,created_at,deduplication_key)
+       values ($1,$2,'goal','performanceGoal',$3,'Coaching review ready',$4,$5,now(),$6)
+       on conflict (deduplication_key) do nothing`,
+      [generatedId("notification"), userId, goalId, explanation, JSON.stringify({ adaptationId: row.id, reason: adaptationReason }), `performance-adaptation:${row.id}`]
+    );
+    return mapAdaptation(row);
+  }
+
+  private async latestAdaptation(goalId: string, statuses?: string[]): Promise<PerformanceGoalAdaptation | undefined> {
+    const values = statuses?.length ? statuses : ["recommended", "pending", "accepted", "declined"];
+    const row = (await this.query(
+      "select * from performance_goal_adaptations where performance_goal_id=$1 and status=any($2::text[]) order by created_at desc limit 1",
+      [goalId, values]
+    )).rows[0];
+    return row ? mapAdaptation(row) : undefined;
+  }
+
+  private async insertPerformanceNotification(userId: string, goalId: string, title: string, body: string, deduplicationKey: string): Promise<void> {
+    await this.query(
+      `insert into notifications
+       (id,user_id,type,entity_type,entity_id,title,body,metadata,created_at,deduplication_key)
+       values ($1,$2,'goal','performanceGoal',$3,$4,$5,'{}'::jsonb,now(),$6)
+       on conflict (deduplication_key) do nothing`,
+      [generatedId("notification"), userId, goalId, title, body, deduplicationKey]
+    );
+  }
+
+  private async performanceAnalysis(userId: string, distanceMeters: number, targetSeconds: number, since?: string, currentBenchmarkSeconds?: number, currentBenchmarkWorkoutId?: string): Promise<PerformanceGoalAnalysis> {
     const tolerance = Math.max(75, distanceMeters * 0.015);
     const qualifying = (await this.query(
       `select * from workout_summaries where user_id = $1 and activity_type = 'running'
@@ -619,7 +992,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     const best = qualifying[0];
     const latest = qualifying.slice().sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0];
     const measuredBest = best ? Math.round(Number(best.duration_seconds)) : undefined;
-    const currentBestSeconds = baselineSeconds == null ? measuredBest : measuredBest == null ? baselineSeconds : Math.min(baselineSeconds, measuredBest);
+    const currentBestSeconds = currentBenchmarkSeconds == null ? measuredBest : measuredBest == null ? currentBenchmarkSeconds : Math.min(currentBenchmarkSeconds, measuredBest);
     const gap = currentBestSeconds == null ? undefined : currentBestSeconds - targetSeconds;
     const improvement = best && latest ? Math.max(0, Math.round(Number(latest.duration_seconds) - Number(best.duration_seconds))) : undefined;
     const ratio = gap == null ? undefined : gap / targetSeconds;
@@ -648,19 +1021,22 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       lateRunSlowdownSeconds: firstHalf == null || secondHalf == null ? undefined : Math.round(secondHalf - firstHalf),
       averageHeartRateBPM: heartRate ? Math.round(Number(heartRate.average_bpm)) : undefined,
       feasibility: ratio == null ? "insufficientData" : ratio <= 0 ? "onTrack" : ratio <= 0.08 ? "onTrack" : ratio <= 0.2 ? "ambitious" : "stretch",
-      qualifyingWorkoutId: measuredBest != null && measuredBest <= (baselineSeconds ?? Number.MAX_SAFE_INTEGER) ? best?.id : baselineWorkoutId,
+      qualifyingWorkoutId: measuredBest != null && measuredBest <= (currentBenchmarkSeconds ?? Number.MAX_SAFE_INTEGER) ? best?.id : currentBenchmarkWorkoutId,
       generatedAt: new Date().toISOString()
     };
   }
 
   private async trainingPlanForGoal(goalId: string): Promise<TrainingPlan | undefined> {
-    const plan = (await this.query("select * from training_plans where performance_goal_id = $1 order by version desc limit 1", [goalId])).rows[0];
+    const plan = (await this.query(
+      "select * from training_plans where performance_goal_id = $1 order by (status = 'active') desc,version desc limit 1",
+      [goalId]
+    )).rows[0];
     if (!plan) return undefined;
     const sessions = (await this.query("select * from training_sessions where plan_id = $1 order by scheduled_date,id", [plan.id])).rows.map(mapTrainingSession);
     return {
       id: plan.id, performanceGoalId: plan.performance_goal_id, version: Number(plan.version), model: plan.model,
       summary: plan.summary, gapExplanation: plan.gap_explanation, recoveryGuidance: plan.recovery_guidance,
-      caution: plan.caution, generatedAt: dateString(plan.generated_at), sessions
+      caution: plan.caution, generatedAt: dateString(plan.generated_at), status: plan.status ?? "active", sessions
     };
   }
 
@@ -671,6 +1047,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       preferredLongRunDay: Number(row.preferred_long_run_day), status: row.status, consentVersion: row.consent_version,
       baselineSeconds: row.baseline_seconds == null ? undefined : Number(row.baseline_seconds),
       baselineWorkoutId: row.baseline_workout_id ?? undefined,
+      currentBenchmarkSeconds: row.current_benchmark_seconds == null ? undefined : Number(row.current_benchmark_seconds),
+      currentBenchmarkWorkoutId: row.current_benchmark_workout_id ?? undefined,
       analysis: row.analysis as PerformanceGoalAnalysis, createdAt: dateString(row.created_at), updatedAt: dateString(row.updated_at)
     };
     const milestones = (await this.query(
@@ -681,7 +1059,9 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       targetSeconds: Number(item.target_seconds), targetDate: dateString(item.target_date).slice(0, 10),
       status: item.status, completedWorkoutId: item.completed_workout_id ?? undefined
     }));
-    return { goal, plan: await this.trainingPlanForGoal(goal.id), milestones };
+    const plan = await this.trainingPlanForGoal(goal.id);
+    const pendingAdaptation = await this.latestAdaptation(goal.id, ["recommended", "pending"]);
+    return { goal, plan, milestones, trajectory: performanceTrajectory(goal, plan), pendingAdaptation };
   }
 
   private async ensureRuntimeTables() {
@@ -805,6 +1185,25 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
         id: "018_performance_goal_baseline_workout",
         statements: [
           "alter table performance_goals add column if not exists baseline_workout_id text references workout_summaries(id) on delete set null"
+        ]
+      },
+      {
+        id: "019_adaptive_performance_coaching",
+        statements: [
+          "alter table performance_goals add column if not exists current_benchmark_seconds integer",
+          "alter table performance_goals add column if not exists current_benchmark_workout_id text references workout_summaries(id) on delete set null",
+          "update performance_goals set current_benchmark_seconds = baseline_seconds, current_benchmark_workout_id = baseline_workout_id where current_benchmark_seconds is null",
+          "alter table training_plans add column if not exists status text not null default 'active'",
+          "alter table training_sessions add column if not exists quality text",
+          "alter table training_sessions add column if not exists match_confidence double precision",
+          "alter table training_sessions drop constraint if exists training_sessions_status_check",
+          "alter table training_sessions add constraint training_sessions_status_check check (status in ('scheduled','completed','partial','skipped','superseded'))",
+          "create table if not exists performance_goal_benchmarks (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, workout_id text not null references workout_summaries(id) on delete cascade, seconds integer not null, kind text not null check (kind in ('original','current')), created_at timestamptz not null default now(), unique(performance_goal_id,workout_id,kind))",
+          "create table if not exists performance_goal_evidence (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, workout_id text not null references workout_summaries(id) on delete cascade, training_session_id text references training_sessions(id) on delete set null, kind text not null check (kind in ('benchmark','session','relevantRun')), match_status text not null check (match_status in ('automatic','confirmed','ambiguous','unmatched')), quality text check (quality in ('targetMet','completed','partial')), match_confidence double precision, impact_summary text not null, created_at timestamptz not null default now(), unique(performance_goal_id,workout_id))",
+          "create table if not exists performance_run_checkins (performance_goal_id text not null references performance_goals(id) on delete cascade, workout_id text not null references workout_summaries(id) on delete cascade, effort_feedback text check (effort_feedback in ('easy','onTarget','hard')), note text, created_at timestamptz not null default now(), primary key(performance_goal_id,workout_id))",
+          "create table if not exists performance_goal_adaptations (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, reason text not null, explanation text not null, status text not null check (status in ('recommended','pending','accepted','declined','expired')), proposed_plan jsonb, created_at timestamptz not null default now(), decided_at timestamptz)",
+          "create index if not exists performance_goal_evidence_goal_idx on performance_goal_evidence(performance_goal_id,created_at desc)",
+          "create index if not exists performance_goal_adaptations_goal_idx on performance_goal_adaptations(performance_goal_id,created_at desc)"
         ]
       }
     ];
@@ -1172,8 +1571,95 @@ function mapTrainingSession(row: any): TrainingSession {
     type: row.type, title: row.title, purpose: row.purpose,
     distanceMeters: row.distance_meters == null ? undefined : Number(row.distance_meters),
     durationSeconds: row.duration_seconds == null ? undefined : Number(row.duration_seconds),
-    effort: row.effort, status: row.status, linkedWorkoutId: row.linked_workout_id ?? undefined
+    effort: row.effort, status: row.status, linkedWorkoutId: row.linked_workout_id ?? undefined,
+    quality: row.quality ?? undefined,
+    matchConfidence: row.match_confidence == null ? undefined : Number(row.match_confidence)
   };
+}
+
+function mapAdaptation(row: any): PerformanceGoalAdaptation {
+  return {
+    id: row.id,
+    performanceGoalId: row.performance_goal_id,
+    reason: row.reason,
+    explanation: row.explanation,
+    status: row.status,
+    proposedPlan: row.proposed_plan ?? undefined,
+    createdAt: dateString(row.created_at),
+    decidedAt: nullableDate(row.decided_at)
+  };
+}
+
+export function performanceTrajectory(goal: PerformanceGoal, plan?: TrainingPlan): PerformanceGoalTrajectory {
+  const original = goal.baselineSeconds;
+  const current = goal.currentBenchmarkSeconds ?? goal.analysis.currentBestSeconds;
+  const improvement = original != null && current != null ? Math.max(0, original - current) : 0;
+  const totalPossible = original == null ? 0 : Math.max(0, original - goal.targetSeconds);
+  const improvementPercent = totalPossible > 0 ? Math.min(1, improvement / totalPossible) : current != null && current <= goal.targetSeconds ? 1 : 0;
+  const start = Date.parse(goal.createdAt);
+  const deadline = Date.parse(`${goal.targetDate}T12:00:00Z`);
+  const elapsedPercent = deadline > start ? Math.min(1, Math.max(0, (Date.now() - start) / (deadline - start))) : 1;
+  const sessions = plan?.sessions.filter((item) => item.status !== "superseded") ?? [];
+  const completed = sessions.filter((item) => item.status === "completed" || item.status === "partial").length;
+  const due = sessions.filter((item) => Date.parse(`${item.scheduledDate}T23:59:59Z`) <= Date.now()).length;
+  const adherence = due > 0 ? completed / due : 0;
+  const achieved = current != null && current <= goal.targetSeconds;
+  const status = achieved ? "achieved" : current == null ? "awaitingData" : improvementPercent >= elapsedPercent + 0.08 ? "ahead" : improvementPercent + 0.08 < elapsedPercent ? "behind" : "onTrack";
+  return {
+    originalBaselineSeconds: original,
+    currentBenchmarkSeconds: current,
+    improvementSeconds: improvement,
+    remainingGapSeconds: current == null ? undefined : Math.max(0, current - goal.targetSeconds),
+    elapsedPercent,
+    improvementPercent,
+    expectedImprovementPercent: elapsedPercent,
+    adherencePercent: Math.min(1, adherence),
+    completedSessions: completed,
+    totalSessions: sessions.length,
+    status
+  };
+}
+
+export function sessionMatchScore(session: TrainingSession, workout: WorkoutSummary): number {
+  const workoutDay = Date.parse(workout.startedAt.slice(0, 10) + "T12:00:00Z");
+  const sessionDay = Date.parse(session.scheduledDate + "T12:00:00Z");
+  const dayDifference = Math.abs(workoutDay - sessionDay) / 86_400_000;
+  if (dayDifference > 2) return 0;
+  let prescriptionScore = 0.65;
+  if (session.distanceMeters != null) {
+    const tolerance = Math.max(100, session.distanceMeters * 0.05);
+    const difference = Math.abs(workout.distanceMeters - session.distanceMeters);
+    if (difference > tolerance * 2) return 0;
+    prescriptionScore = Math.max(0.35, 1 - difference / (tolerance * 2));
+  } else if (session.durationSeconds != null) {
+    const difference = Math.abs(workout.durationSeconds - session.durationSeconds);
+    if (difference > session.durationSeconds * 0.3) return 0;
+    prescriptionScore = Math.max(0.35, 1 - difference / (session.durationSeconds * 0.3));
+  }
+  const dateScore = 1 - dayDifference / 3;
+  return Math.min(1, prescriptionScore * 0.75 + dateScore * 0.25);
+}
+
+export function sessionQuality(session: TrainingSession, workout: WorkoutSummary): "targetMet" | "completed" | "partial" {
+  if (session.distanceMeters != null) {
+    const tolerance = Math.max(100, session.distanceMeters * 0.05);
+    if (Math.abs(workout.distanceMeters - session.distanceMeters) > tolerance) return "partial";
+  }
+  if (session.durationSeconds != null) {
+    const difference = Math.abs(workout.durationSeconds - session.durationSeconds);
+    if (difference > session.durationSeconds * 0.15) return "partial";
+  }
+  return session.type === "timeTrial" || session.type === "tempo" || session.type === "intervals" ? "targetMet" : "completed";
+}
+
+function formatDistance(meters: number): string {
+  return meters === 21_097.5 ? "half marathon" : `${Number((meters / 1000).toFixed(1))} km`;
+}
+
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(Math.max(0, seconds) / 60);
+  const remainder = Math.max(0, seconds) % 60;
+  return `${minutes}:${remainder.toString().padStart(2, "0")}`;
 }
 
 function generatedId(prefix: string): string {
