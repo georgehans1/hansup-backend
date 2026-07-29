@@ -73,6 +73,53 @@ export async function generateGeminiPlan(config: ProductionConfig, detail: Perfo
   return draft;
 }
 
+export async function generateGeminiSessionAnalysis(config: ProductionConfig, context: Record<string, unknown>): Promise<{
+  summary: string; observations: string[]; recommendation: string;
+}> {
+  if (!config.geminiApiKey) throw new Error("AI coaching is not configured");
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.geminiModel ?? "gemini-2.5-flash")}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{
+            text: JSON.stringify({
+              context,
+              instructions: [
+                "Analyse this completed run only in relation to its prescribed training session.",
+                "Be concise, supportive, and specific to the supplied pace, split, heart-rate, and effort facts.",
+                "Do not diagnose injury or provide medical treatment.",
+                "Return JSON only. Provide a short summary, two to five observations, and one practical recommendation for the next session."
+              ]
+            })
+          }]
+        }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            required: ["summary", "observations", "recommendation"],
+            properties: {
+              summary: { type: "STRING" },
+              observations: { type: "ARRAY", items: { type: "STRING" } },
+              recommendation: { type: "STRING" }
+            }
+          }
+        }
+      })
+    }
+  );
+  if (!response.ok) throw new Error(`Session analysis failed (${response.status})`);
+  const payload = await response.json() as any;
+  const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Coach returned no session analysis");
+  const result = JSON.parse(text);
+  if (!result.summary || !Array.isArray(result.observations) || !result.recommendation) throw new Error("Coach returned an incomplete session analysis");
+  return result;
+}
+
 function validatePlan(plan: PlanDraft) {
   if (!plan.summary || !plan.gapExplanation || !plan.recoveryGuidance || !plan.caution || !Array.isArray(plan.sessions)) {
     throw new Error("Coach returned an incomplete plan");

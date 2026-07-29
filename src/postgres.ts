@@ -30,6 +30,8 @@ import type {
   PerformanceGoalEvidence,
   PerformanceGoalTrajectory,
   PerformanceQualifyingRun,
+  TrainingSessionAnalysis,
+  TrainingSessionDetail,
   TrainingPlan,
   TrainingSession,
   WorkoutHeartRateDetail,
@@ -739,6 +741,101 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     return mapTrainingSession(row);
   }
 
+  async trainingSessionDetailFor(userId: string, sessionId: string): Promise<TrainingSessionDetail> {
+    const owned = (await this.query(
+      `select s.*,g.id as goal_id from training_sessions s join training_plans p on p.id=s.plan_id
+       join performance_goals g on g.id=p.performance_goal_id where s.id=$1 and g.user_id=$2`,
+      [sessionId, userId]
+    )).rows[0];
+    if (!owned) throw new Error("Training session not found");
+    const session = mapTrainingSession(owned);
+    const linkedWorkout = session.linkedWorkoutId
+      ? (await this.query("select * from workout_summaries where id=$1 and user_id=$2", [session.linkedWorkoutId, userId])).rows[0]
+      : undefined;
+    const evidenceRow = (await this.query(
+      `select e.*,w.*,e.id as evidence_id,e.created_at as evidence_created_at,c.effort_feedback,c.note
+       from performance_goal_evidence e join workout_summaries w on w.id=e.workout_id
+       left join performance_run_checkins c on c.performance_goal_id=e.performance_goal_id and c.workout_id=e.workout_id
+       where e.training_session_id=$1 order by e.created_at desc limit 1`,
+      [sessionId]
+    )).rows[0];
+    const analysisRow = (await this.query(
+      "select * from training_session_analyses where training_session_id=$1 order by generated_at desc limit 1",
+      [sessionId]
+    )).rows[0];
+    const candidates = (await this.query(
+      `select * from workout_summaries where user_id=$1 and activity_type='running'
+       and started_at::date between ($2::date - interval '2 days') and ($2::date + interval '2 days')
+       order by abs(extract(epoch from (started_at::date - $2::date))),started_at desc`,
+      [userId, session.scheduledDate]
+    )).rows.map(mapWorkout).filter((workout) => sessionMatchScore(session, workout) >= 0.45).slice(0, 8);
+    return {
+      session,
+      linkedWorkout: linkedWorkout ? mapWorkout(linkedWorkout) : undefined,
+      evidence: evidenceRow ? mapEvidenceRow(evidenceRow, owned.goal_id) : undefined,
+      analysis: analysisRow ? mapTrainingSessionAnalysis(analysisRow) : undefined,
+      suggestedRuns: candidates
+    };
+  }
+
+  async trainingSessionAnalysisContext(userId: string, sessionId: string): Promise<Record<string, unknown>> {
+    const detail = await this.trainingSessionDetailFor(userId, sessionId);
+    if (!detail.linkedWorkout) throw new Error("Link a run before requesting coaching analysis");
+    const splits = (await this.query(
+      "select split_index,pace_seconds_per_km,average_heart_rate_bpm from workout_splits where workout_id=$1 and is_partial=false order by split_index",
+      [detail.linkedWorkout.id]
+    )).rows;
+    const heartRate = (await this.query(
+      "select average_bpm,minimum_bpm,maximum_bpm from workout_heart_rate_summaries where workout_id=$1",
+      [detail.linkedWorkout.id]
+    )).rows[0];
+    return {
+      prescription: {
+        type: detail.session.type, title: detail.session.title, purpose: detail.session.purpose,
+        scheduledDate: detail.session.scheduledDate, distanceMeters: detail.session.distanceMeters,
+        durationSeconds: detail.session.durationSeconds, effort: detail.session.effort
+      },
+      result: {
+        workoutId: detail.linkedWorkout.id,
+        durationSeconds: detail.linkedWorkout.durationSeconds,
+        distanceMeters: detail.linkedWorkout.distanceMeters,
+        averagePaceSecondsPerKm: detail.linkedWorkout.distanceMeters > 0
+          ? Math.round(detail.linkedWorkout.durationSeconds / (detail.linkedWorkout.distanceMeters / 1000)) : undefined,
+        quality: detail.session.quality,
+        matchConfidence: detail.session.matchConfidence,
+        splits: splits.map((row) => ({
+          index: Number(row.split_index), paceSecondsPerKm: Number(row.pace_seconds_per_km),
+          averageHeartRateBPM: row.average_heart_rate_bpm == null ? undefined : Number(row.average_heart_rate_bpm)
+        })),
+        heartRate: heartRate ? {
+          averageBPM: Number(heartRate.average_bpm), minimumBPM: Number(heartRate.minimum_bpm), maximumBPM: Number(heartRate.maximum_bpm)
+        } : undefined,
+        effortFeedback: detail.evidence?.effortFeedback,
+        note: detail.evidence?.note
+      }
+    };
+  }
+
+  async saveTrainingSessionAnalysis(userId: string, sessionId: string, workoutId: string, model: string, content: {
+    summary: string; observations: string[]; recommendation: string;
+  }): Promise<TrainingSessionDetail> {
+    if (!content.summary || !content.recommendation || !Array.isArray(content.observations)) throw new Error("Incomplete session analysis");
+    const ownership = (await this.query(
+      `select 1 from training_sessions s join training_plans p on p.id=s.plan_id join performance_goals g on g.id=p.performance_goal_id
+       where s.id=$1 and s.linked_workout_id=$2 and g.user_id=$3`,
+      [sessionId, workoutId, userId]
+    )).rows.length;
+    if (!ownership) throw new Error("Linked training session not found");
+    await this.query(
+      `insert into training_session_analyses (id,training_session_id,workout_id,summary,observations,recommendation,model)
+       values ($1,$2,$3,$4,$5,$6,$7)
+       on conflict (training_session_id,workout_id) do update set summary=excluded.summary,observations=excluded.observations,
+       recommendation=excluded.recommendation,model=excluded.model,generated_at=now()`,
+      [generatedId("tsa"), sessionId, workoutId, content.summary.slice(0, 1200), JSON.stringify(content.observations.slice(0, 5)), content.recommendation.slice(0, 1200), model]
+    );
+    return this.trainingSessionDetailFor(userId, sessionId);
+  }
+
   async refreshPerformanceGoalAnalysis(userId: string, goalId: string): Promise<PerformanceGoalDetail> {
     const detail = await this.performanceGoalFor(userId, goalId);
     if (!detail) throw new Error("Performance goal not found");
@@ -1205,6 +1302,12 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
           "create index if not exists performance_goal_evidence_goal_idx on performance_goal_evidence(performance_goal_id,created_at desc)",
           "create index if not exists performance_goal_adaptations_goal_idx on performance_goal_adaptations(performance_goal_id,created_at desc)"
         ]
+      },
+      {
+        id: "020_training_session_analysis",
+        statements: [
+          "create table if not exists training_session_analyses (id text primary key, training_session_id text not null references training_sessions(id) on delete cascade, workout_id text not null references workout_summaries(id) on delete cascade, summary text not null, observations jsonb not null default '[]'::jsonb, recommendation text not null, model text not null, generated_at timestamptz not null default now(), unique(training_session_id,workout_id))"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -1587,6 +1690,36 @@ function mapAdaptation(row: any): PerformanceGoalAdaptation {
     proposedPlan: row.proposed_plan ?? undefined,
     createdAt: dateString(row.created_at),
     decidedAt: nullableDate(row.decided_at)
+  };
+}
+
+function mapEvidenceRow(row: any, goalId: string): PerformanceGoalEvidence {
+  return {
+    id: row.evidence_id,
+    performanceGoalId: goalId,
+    workout: mapWorkout(row),
+    trainingSessionId: row.training_session_id ?? undefined,
+    kind: row.kind,
+    matchStatus: row.match_status,
+    quality: row.quality ?? undefined,
+    matchConfidence: row.match_confidence == null ? undefined : Number(row.match_confidence),
+    impactSummary: row.impact_summary,
+    createdAt: dateString(row.evidence_created_at),
+    effortFeedback: row.effort_feedback ?? undefined,
+    note: row.note ?? undefined
+  };
+}
+
+function mapTrainingSessionAnalysis(row: any): TrainingSessionAnalysis {
+  return {
+    id: row.id,
+    trainingSessionId: row.training_session_id,
+    workoutId: row.workout_id,
+    summary: row.summary,
+    observations: Array.isArray(row.observations) ? row.observations : [],
+    recommendation: row.recommendation,
+    model: row.model,
+    generatedAt: dateString(row.generated_at)
   };
 }
 

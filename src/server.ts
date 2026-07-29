@@ -79,7 +79,7 @@ import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
 import type { PersistenceChange } from "./postgres.js";
 import type { PostgresRepository } from "./postgres.js";
-import { generateGeminiPlan } from "./gemini.js";
+import { generateGeminiPlan, generateGeminiSessionAnalysis } from "./gemini.js";
 import { error as logError, info, warn } from "./logger.js";
 
 const demoUserId = "u_ama";
@@ -301,8 +301,23 @@ export function createServer(
 
       const trainingSessionRoute = url.pathname.match(/^\/training-sessions\/([^/]+)$/);
       const trainingSessionWorkoutRoute = url.pathname.match(/^\/training-sessions\/([^/]+)\/link-workout$/);
+      const trainingSessionDetailRoute = url.pathname.match(/^\/training-sessions\/([^/]+)\/detail$/);
+      const trainingSessionAnalysisRoute = url.pathname.match(/^\/training-sessions\/([^/]+)\/analysis$/);
       if (req.method === "PATCH" && trainingSessionRoute) {
         return json(res, 200, await performanceGoals!.updateTrainingSession(userId, trainingSessionRoute[1], await body(req)));
+      }
+      if (req.method === "GET" && trainingSessionDetailRoute) {
+        return json(res, 200, await performanceGoals!.trainingSessionDetailFor(userId, trainingSessionDetailRoute[1]));
+      }
+      if (req.method === "POST" && trainingSessionAnalysisRoute) {
+        const context = await performanceGoals!.trainingSessionAnalysisContext(userId, trainingSessionAnalysisRoute[1]);
+        const result = await generateGeminiSessionAnalysis(config, context);
+        const workoutId = (context.result as { workoutId?: string } | undefined)?.workoutId
+          ?? (await performanceGoals!.trainingSessionDetailFor(userId, trainingSessionAnalysisRoute[1])).linkedWorkout?.id;
+        if (!workoutId) return json(res, 409, { error: "Link a run before requesting coaching analysis" });
+        return json(res, 200, await performanceGoals!.saveTrainingSessionAnalysis(
+          userId, trainingSessionAnalysisRoute[1], workoutId, config.geminiModel ?? "gemini-2.5-flash", result
+        ));
       }
       if (req.method === "POST" && trainingSessionWorkoutRoute) {
         const payload = await body<{ workoutId: string }>(req);

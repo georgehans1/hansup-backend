@@ -216,6 +216,25 @@ export interface PerformanceGoalEvidence {
   note?: string;
 }
 
+export interface TrainingSessionAnalysis {
+  id: ID;
+  trainingSessionId: ID;
+  workoutId: ID;
+  summary: string;
+  observations: string[];
+  recommendation: string;
+  model: string;
+  generatedAt: string;
+}
+
+export interface TrainingSessionDetail {
+  session: TrainingSession;
+  linkedWorkout?: WorkoutSummary;
+  evidence?: PerformanceGoalEvidence;
+  analysis?: TrainingSessionAnalysis;
+  suggestedRuns: WorkoutSummary[];
+}
+
 export interface PerformanceQualifyingRun {
   workout: WorkoutSummary;
   qualifiesBenchmark: boolean;

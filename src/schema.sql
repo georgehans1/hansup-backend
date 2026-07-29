@@ -254,6 +254,18 @@ CREATE TABLE performance_goal_adaptations (
   decided_at timestamptz
 );
 
+CREATE TABLE training_session_analyses (
+  id text PRIMARY KEY,
+  training_session_id text NOT NULL REFERENCES training_sessions(id) ON DELETE CASCADE,
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  summary text NOT NULL,
+  observations jsonb NOT NULL DEFAULT '[]'::jsonb,
+  recommendation text NOT NULL,
+  model text NOT NULL,
+  generated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(training_session_id, workout_id)
+);
+
 CREATE TABLE coach_generations (
   id text PRIMARY KEY,
   performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
