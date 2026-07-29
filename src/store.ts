@@ -68,6 +68,7 @@ export interface AppStore {
   deviceTokens: Array<{ userId: ID; token: string; platform: "ios"; createdAt: string }>;
   reports: Array<{ id: ID; reporterId: ID; targetType: "user" | "message"; targetId: ID; reason: string; createdAt: string }>;
   notifications: AppNotification[];
+  workoutReactions: Reaction[];
   challengeComments: ChallengeComment[];
   profileHighlights: ProfileHighlight[];
 }
@@ -93,9 +94,10 @@ export function createEmptyStore(): AppStore {
     blockedUsers: [],
     deviceTokens: [],
     reports: [],
-    notifications: []
-    ,challengeComments: []
-    ,profileHighlights: []
+    notifications: [],
+    workoutReactions: [],
+    challengeComments: [],
+    profileHighlights: []
   };
 }
 
@@ -115,6 +117,26 @@ export function updateWorkoutSocialMetadata(
   workout.automaticTitle ||= automaticWorkoutTitle(workout);
   workout.updatedAt = new Date().toISOString();
   return workout;
+}
+
+export function toggleWorkoutReaction(store: AppStore, userId: ID, workoutId: ID, kind: ReactionKind): Reaction[] {
+  workoutForViewer(store, userId, workoutId);
+  const existing = store.workoutReactions.find((item) => item.targetId === workoutId && item.userId === userId);
+  if (existing?.kind === kind) {
+    store.workoutReactions = store.workoutReactions.filter((item) => item.id !== existing.id);
+  } else {
+    store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
+    store.workoutReactions.push({
+      id: `workout_reaction_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      targetType: "workout", targetId: workoutId, userId, kind, createdAt: new Date().toISOString()
+    });
+  }
+  return store.workoutReactions.filter((item) => item.targetId === workoutId);
+}
+
+export function workoutReactionsFor(store: AppStore, userId: ID, workoutId: ID): Reaction[] {
+  workoutForViewer(store, userId, workoutId);
+  return store.workoutReactions.filter((item) => item.targetId === workoutId);
 }
 
 export function compareWorkouts(store: AppStore, userId: ID, firstId: ID, secondId: ID): WorkoutComparison {
@@ -340,6 +362,7 @@ export function createDemoStore(): AppStore {
     deviceTokens: [],
     reports: [],
     notifications: [],
+    workoutReactions: [],
     challengeComments: [],
     profileHighlights: []
   };
@@ -486,7 +509,7 @@ export function profileActivity(store: AppStore, viewerId: ID, userId: ID, from?
   return {
     profile: publicProfile(store, viewerId, userId),
     summaries: hideExact ? [] : store.summaries.filter((summary) => summary.userId === userId && inRange(summary.localDate)),
-    workouts: store.workouts.filter((workout) => workout.userId === userId && inRange(workout.startedAt.slice(0, 10))).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout),
+    workouts: store.workouts.filter((workout) => workout.userId === userId && inRange(workout.startedAt.slice(0, 10)) && (viewerId === userId || workout.visibility !== "private")).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout),
     feed: store.feed.filter((item) => item.userId === userId),
     stats: hideExact ? undefined : profileStats(store, userId),
     records: hideExact ? undefined : profileRecords(store, userId),
@@ -499,7 +522,7 @@ export function profileActivity(store: AppStore, viewerId: ID, userId: ID, from?
 export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset = 0) {
   const friendIds = new Set(friendsFor(store, viewerId).map((user) => user.id));
   return store.workouts
-    .filter((workout) => friendIds.has(workout.userId) && !store.settings.find((item) => item.userId === workout.userId)?.hideActivityFromFriends)
+    .filter((workout) => friendIds.has(workout.userId) && workout.visibility !== "private" && !store.settings.find((item) => item.userId === workout.userId)?.hideActivityFromFriends)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
     .slice(offset, offset + Math.min(Math.max(limit, 1), 50))
     .map((workout) => store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers
@@ -518,7 +541,7 @@ export function circleTimeline(
   const visible = (userId: ID) =>
     friendIds.has(userId) && !store.settings.find((item) => item.userId === userId)?.hideActivityFromFriends;
   const workoutEntries: CircleTimelineEntry[] = store.workouts
-    .filter((workout) => visible(workout.userId))
+    .filter((workout) => visible(workout.userId) && workout.visibility !== "private")
     .filter((workout) => ["all", "activities", workout.activityType].includes(filter))
     .map((workout) => {
       const hideExact = store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers;
@@ -565,6 +588,7 @@ export function workoutForViewer(store: AppStore, viewerId: ID, workoutId: ID) {
   if (!workout) throw new Error("Activity not found");
   if (workout.userId === viewerId) return workout;
   if (friendshipStatus(store, viewerId, workout.userId) !== "accepted") throw new Error("Activity not available");
+  if (workout.visibility === "private") throw new Error("Activity not available");
   const privacy = store.settings.find((item) => item.userId === workout.userId);
   if (privacy?.hideActivityFromFriends) throw new Error("Activity not available");
   return privacy?.hideExactNumbers ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;

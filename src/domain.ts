@@ -454,7 +454,7 @@ export interface FeedItem {
 
 export interface Reaction {
   id: ID;
-  targetType: "feed" | "message";
+  targetType: "feed" | "message" | "workout";
   targetId: ID;
   userId: ID;
   kind: ReactionKind;
