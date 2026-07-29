@@ -77,7 +77,7 @@ import {
   ,addChallengeComment
   ,profileHighlightsFor
   ,replaceProfileHighlights
-  ,toggleWorkoutReaction
+  ,setWorkoutClap
   ,workoutReactionsFor
 } from "./store.js";
 import { LeaderboardMetric, LeaderboardPeriod } from "./domain.js";
@@ -690,8 +690,8 @@ export function createServer(
       const workoutReactions = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/reactions$/);
       if (req.method === "GET" && workoutReactions) return json(res, 200, workoutReactionsFor(store, userId, workoutReactions[1]));
       if (req.method === "POST" && workoutReactions) {
-        const payload = await body<{ kind: any }>(req);
-        const result = toggleWorkoutReaction(store, userId, workoutReactions[1], payload.kind);
+        const payload = await body<{ isClapped: boolean }>(req);
+        const result = setWorkoutClap(store, userId, workoutReactions[1], payload.isClapped === true);
         await onChange({ kind: "workout-reactions", workoutId: workoutReactions[1] });
         return json(res, 200, result);
       }

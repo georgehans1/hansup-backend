@@ -119,13 +119,10 @@ export function updateWorkoutSocialMetadata(
   return workout;
 }
 
-export function toggleWorkoutReaction(store: AppStore, userId: ID, workoutId: ID, _kind: ReactionKind): Reaction[] {
+export function setWorkoutClap(store: AppStore, userId: ID, workoutId: ID, isClapped: boolean): Reaction[] {
   workoutForViewer(store, userId, workoutId);
-  const existing = store.workoutReactions.find((item) => item.targetId === workoutId && item.userId === userId);
-  if (existing?.kind === "cheer") {
-    store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
-  } else {
-    store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
+  store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
+  if (isClapped) {
     store.workoutReactions.push({
       id: `workout_reaction_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       targetType: "workout", targetId: workoutId, userId, kind: "cheer", createdAt: new Date().toISOString()
