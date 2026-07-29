@@ -116,8 +116,6 @@ export interface WorkoutSummary {
   note?: string;
   effortRating?: 1 | 2 | 3 | 4 | 5;
   visibility?: "friends" | "private";
-  clapCount?: number;
-  viewerHasClapped?: boolean;
 }
 
 export interface WorkoutComparison {

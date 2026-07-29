@@ -67,7 +67,6 @@ export type PersistenceChange =
   | { kind: "conversation-leave"; conversationId: string; userId: string }
   | { kind: "reaction"; reactionId: string }
   | { kind: "message-reactions"; messageId: string }
-  | { kind: "workout-reactions"; workoutId: string }
   | { kind: "challenge"; challengeId: string; includeSharedMessages?: boolean }
   | { kind: "challenge-comment"; commentId: string }
   | { kind: "profile-highlights"; userId: string }
@@ -118,7 +117,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     const conversations = (await this.query("select * from conversations")).rows.map(mapConversation);
     const members = (await this.query("select * from conversation_members")).rows.map(mapConversationMember);
     const messages = (await this.query("select * from messages order by created_at")).rows.map(mapMessage);
-    const reactions = (await this.query("select * from reactions")).rows.map(mapReaction);
+    const reactions = (await this.query("select * from reactions where target_type <> 'workout'")).rows.map(mapReaction);
     const reads = (await this.query("select * from message_reads")).rows;
     const mutes = (await this.query("select * from conversation_mutes")).rows;
     const badges = (await this.query("select * from badges")).rows.map(mapBadge);
@@ -180,7 +179,6 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       deviceTokens,
       reports,
       notifications,
-      workoutReactions: reactions.filter((item) => item.targetType === "workout"),
       challengeComments,
       profileHighlights
     };
@@ -243,7 +241,6 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     );
     for (const report of store.reports) await this.insertReport(report);
     for (const notification of store.notifications) await this.insertNotification(notification);
-    for (const reaction of store.workoutReactions) await this.insertReaction(reaction);
   }
 
   async persistChange(store: AppStore, change: PersistenceChange): Promise<void> {
@@ -371,10 +368,6 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
         for (const reaction of message.reactions) await this.insertReaction(reaction);
         return;
       }
-      case "workout-reactions":
-        await this.query("delete from reactions where target_type = 'workout' and target_id = $1", [change.workoutId]);
-        for (const reaction of store.workoutReactions.filter((item) => item.targetId === change.workoutId)) await this.insertReaction(reaction);
-        return;
       case "challenge": {
         const challenge = required(store.challenges.find((item) => item.id === change.challengeId), "Challenge");
         await this.insertChallenge(challenge);

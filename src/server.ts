@@ -77,8 +77,6 @@ import {
   ,addChallengeComment
   ,profileHighlightsFor
   ,replaceProfileHighlights
-  ,setWorkoutClap
-  ,workoutReactionsFor
 } from "./store.js";
 import { LeaderboardMetric, LeaderboardPeriod } from "./domain.js";
 import type { WorkoutHeartRatePoint } from "./domain.js";
@@ -687,15 +685,6 @@ export function createServer(
         await onChange({ kind: "workouts", workoutIds: [result.id] });
         return json(res, 200, result);
       }
-      const workoutReactions = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/reactions$/);
-      if (req.method === "GET" && workoutReactions) return json(res, 200, workoutReactionsFor(store, userId, workoutReactions[1]));
-      if ((req.method === "PUT" || req.method === "POST") && workoutReactions) {
-        const payload = await body<{ isClapped: boolean }>(req);
-        const result = setWorkoutClap(store, userId, workoutReactions[1], payload.isClapped === true);
-        await onChange({ kind: "workout-reactions", workoutId: workoutReactions[1] });
-        return json(res, 200, result);
-      }
-
       if (req.method === "POST" && url.pathname === "/activities/workouts/compare") {
         const payload = await body<{ firstId: string; secondId: string }>(req);
         return json(res, 200, compareWorkouts(store, userId, payload.firstId, payload.secondId));
