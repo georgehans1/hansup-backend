@@ -119,7 +119,7 @@ export function updateWorkoutSocialMetadata(
   return workout;
 }
 
-export function setWorkoutClap(store: AppStore, userId: ID, workoutId: ID, isClapped: boolean): Reaction[] {
+export function setWorkoutClap(store: AppStore, userId: ID, workoutId: ID, isClapped: boolean) {
   workoutForViewer(store, userId, workoutId);
   store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
   if (isClapped) {
@@ -128,12 +128,24 @@ export function setWorkoutClap(store: AppStore, userId: ID, workoutId: ID, isCla
       targetType: "workout", targetId: workoutId, userId, kind: "cheer", createdAt: new Date().toISOString()
     });
   }
-  return store.workoutReactions.filter((item) => item.targetId === workoutId && item.kind === "cheer");
+  return workoutClapSummary(store, userId, workoutId);
 }
 
 export function workoutReactionsFor(store: AppStore, userId: ID, workoutId: ID): Reaction[] {
   workoutForViewer(store, userId, workoutId);
   return store.workoutReactions.filter((item) => item.targetId === workoutId && item.kind === "cheer");
+}
+
+function workoutClapSummary(store: AppStore, viewerId: ID, workoutId: ID) {
+  const reactions = store.workoutReactions.filter((item) => item.targetId === workoutId && item.kind === "cheer");
+  return {
+    clapCount: reactions.length,
+    viewerHasClapped: reactions.some((item) => item.userId === viewerId)
+  };
+}
+
+function withWorkoutClapSummary(store: AppStore, viewerId: ID, workout: WorkoutSummary): WorkoutSummary {
+  return { ...workout, ...workoutClapSummary(store, viewerId, workout.id) };
 }
 
 export function compareWorkouts(store: AppStore, userId: ID, firstId: ID, secondId: ID): WorkoutComparison {
@@ -506,7 +518,7 @@ export function profileActivity(store: AppStore, viewerId: ID, userId: ID, from?
   return {
     profile: publicProfile(store, viewerId, userId),
     summaries: hideExact ? [] : store.summaries.filter((summary) => summary.userId === userId && inRange(summary.localDate)),
-    workouts: store.workouts.filter((workout) => workout.userId === userId && inRange(workout.startedAt.slice(0, 10)) && (viewerId === userId || workout.visibility !== "private")).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout),
+    workouts: store.workouts.filter((workout) => workout.userId === userId && inRange(workout.startedAt.slice(0, 10)) && (viewerId === userId || workout.visibility !== "private")).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((workout) => withWorkoutClapSummary(store, viewerId, hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout)),
     feed: store.feed.filter((item) => item.userId === userId),
     stats: hideExact ? undefined : profileStats(store, userId),
     records: hideExact ? undefined : profileRecords(store, userId),
@@ -522,9 +534,9 @@ export function friendActivity(store: AppStore, viewerId: ID, limit = 20, offset
     .filter((workout) => friendIds.has(workout.userId) && workout.visibility !== "private" && !store.settings.find((item) => item.userId === workout.userId)?.hideActivityFromFriends)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
     .slice(offset, offset + Math.min(Math.max(limit, 1), 50))
-    .map((workout) => store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers
+    .map((workout) => withWorkoutClapSummary(store, viewerId, store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers
       ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 }
-      : workout);
+      : workout));
 }
 
 export function circleTimeline(
@@ -542,7 +554,7 @@ export function circleTimeline(
     .filter((workout) => ["all", "activities", workout.activityType].includes(filter))
     .map((workout) => {
       const hideExact = store.settings.find((item) => item.userId === workout.userId)?.hideExactNumbers;
-      const safeWorkout = hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;
+      const safeWorkout = withWorkoutClapSummary(store, viewerId, hideExact ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout);
       return {
         id: `circle_workout_${workout.id}`,
         type: "workout",
@@ -583,12 +595,12 @@ function workoutTimelineSummary(workout: WorkoutSummary): string {
 export function workoutForViewer(store: AppStore, viewerId: ID, workoutId: ID) {
   const workout = store.workouts.find((item) => item.id === workoutId);
   if (!workout) throw new Error("Activity not found");
-  if (workout.userId === viewerId) return workout;
+  if (workout.userId === viewerId) return withWorkoutClapSummary(store, viewerId, workout);
   if (friendshipStatus(store, viewerId, workout.userId) !== "accepted") throw new Error("Activity not available");
   if (workout.visibility === "private") throw new Error("Activity not available");
   const privacy = store.settings.find((item) => item.userId === workout.userId);
   if (privacy?.hideActivityFromFriends) throw new Error("Activity not available");
-  return privacy?.hideExactNumbers ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout;
+  return withWorkoutClapSummary(store, viewerId, privacy?.hideExactNumbers ? { ...workout, durationSeconds: 0, distanceMeters: 0, calories: 0 } : workout);
 }
 
 export function workoutForExactViewer(store: AppStore, viewerId: ID, workoutId: ID) {
@@ -1337,7 +1349,8 @@ export function activitySummariesFor(store: AppStore, userId: ID, from?: string,
 
 export function activityWorkoutsFor(store: AppStore, userId: ID, input: { from?: string; to?: string; type?: string; limit?: number; before?: string }) {
   return store.workouts.filter((item) => item.userId === userId && (!input.from || item.startedAt.slice(0, 10) >= input.from) && (!input.to || item.startedAt.slice(0, 10) <= input.to) && (!input.type || item.activityType === input.type) && (!input.before || item.startedAt < input.before))
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, Math.min(Math.max(input.limit ?? 50, 1), 200));
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, Math.min(Math.max(input.limit ?? 50, 1), 200))
+    .map((workout) => withWorkoutClapSummary(store, userId, workout));
 }
 
 export function activityAggregatesFor(store: AppStore, userId: ID, weeks = 13) {
