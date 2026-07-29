@@ -486,7 +486,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string; baselineWorkoutId?: string;
   }): Promise<PerformanceGoalDetail> {
     if (![1000, 2000, 3000, 4000, 5000, 10000, 21097.5].includes(input.distanceMeters)) throw new Error("Unsupported performance distance");
-    if (input.targetSeconds <= 0 || input.trainingDaysPerWeek < 2 || input.trainingDaysPerWeek > 7) throw new Error("Invalid performance goal");
+    if (input.targetSeconds <= 0 || input.trainingDaysPerWeek < 1 || input.trainingDaysPerWeek > 7) throw new Error("Invalid performance goal");
     if ((await this.query("select 1 from performance_goals where user_id = $1 and status = 'active'", [userId])).rows.length) throw new Error("Complete or archive your active performance goal first");
     const id = generatedId("pg");
     let analysis = await this.performanceAnalysis(userId, input.distanceMeters, input.targetSeconds);
@@ -552,7 +552,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   }): Promise<PerformanceGoalDetail> {
     if (patch.status) return this.updatePerformanceGoalStatus(userId, goalId, patch.status);
     if (patch.targetSeconds != null && patch.targetSeconds <= 0) throw new Error("Invalid target time");
-    if (patch.trainingDaysPerWeek != null && (patch.trainingDaysPerWeek < 2 || patch.trainingDaysPerWeek > 7)) throw new Error("Invalid training days");
+    if (patch.trainingDaysPerWeek != null && (patch.trainingDaysPerWeek < 1 || patch.trainingDaysPerWeek > 7)) throw new Error("Invalid training days");
     const row = (await this.query(
       `update performance_goals set
        target_seconds=coalesce($1,target_seconds),target_date=coalesce($2,target_date),
@@ -766,7 +766,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     const candidates = (await this.query(
       `select * from workout_summaries where user_id=$1 and activity_type='running'
        and started_at::date between ($2::date - interval '2 days') and ($2::date + interval '2 days')
-       order by abs(extract(epoch from (started_at::date - $2::date))),started_at desc`,
+       order by abs(started_at::date - $2::date),started_at desc`,
       [userId, session.scheduledDate]
     )).rows.map(mapWorkout).filter((workout) => sessionMatchScore(session, workout) >= 0.45).slice(0, 8);
     return {
