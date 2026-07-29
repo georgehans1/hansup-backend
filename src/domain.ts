@@ -2,6 +2,8 @@ export type ID = string;
 
 export type ActivityKind = "steps" | "distance" | "walking" | "running" | "strengthTraining" | "activeMinutes" | "calories";
 export type GoalCadence = "daily" | "weekly";
+export type PerformanceGoalStatus = "active" | "completed" | "abandoned" | "archived";
+export type TrainingSessionStatus = "scheduled" | "completed" | "skipped";
 export type ChallengeStatus = "inviting" | "active" | "completed";
 export type ChallengeTemplate =
   | "weekly_steps"
@@ -16,6 +18,7 @@ export type FeedItemType = "activity" | "goal" | "streak" | "challenge" | "recap
 export type ConversationKind = "direct" | "group";
 export type MessageKind = "user" | "system";
 export type LeaderboardPeriod = "today" | "week" | "month" | "all";
+export type LeaderboardMetric = "steps" | "distance" | "walking" | "running" | "activeMinutes" | "calories" | "strengthSessions";
 export type BadgeRuleKind =
   | "streak" | "challengeWins" | "lifetimeSteps" | "goalHits" | "maxDailySteps" | "overGoalPercent"
   | "walkingWorkouts" | "maxWalkDistance" | "walkingActiveDaysWeek" | "lifetimeWalkingDistance"
@@ -49,6 +52,7 @@ export interface PublicUserProfile {
 
 export interface UserSettings {
   userId: ID;
+  homeGoalId?: ID;
   hideActivityFromFriends: boolean;
   hideExactNumbers: boolean;
   searchable: boolean;
@@ -107,6 +111,83 @@ export interface WorkoutSummary {
   updatedAt: string;
 }
 
+export interface PerformanceGoalAnalysis {
+  currentBestSeconds?: number;
+  targetSeconds: number;
+  requiredPaceSecondsPerKm: number;
+  currentPaceSecondsPerKm?: number;
+  timeGapSeconds?: number;
+  recentWeeklyDistanceMeters: number;
+  recentRuns: number;
+  improvementSeconds?: number;
+  splitVariationSeconds?: number;
+  lateRunSlowdownSeconds?: number;
+  averageHeartRateBPM?: number;
+  feasibility: "insufficientData" | "onTrack" | "ambitious" | "stretch";
+  qualifyingWorkoutId?: ID;
+  generatedAt: string;
+}
+
+export interface PerformanceGoal {
+  id: ID;
+  userId: ID;
+  distanceMeters: number;
+  targetSeconds: number;
+  targetDate: string;
+  trainingDaysPerWeek: number;
+  preferredLongRunDay: number;
+  status: PerformanceGoalStatus;
+  consentVersion: string;
+  baselineSeconds?: number;
+  baselineWorkoutId?: ID;
+  analysis: PerformanceGoalAnalysis;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TrainingSession {
+  id: ID;
+  planId: ID;
+  scheduledDate: string;
+  type: string;
+  title: string;
+  purpose: string;
+  distanceMeters?: number;
+  durationSeconds?: number;
+  effort: string;
+  status: TrainingSessionStatus;
+  linkedWorkoutId?: ID;
+}
+
+export interface TrainingPlan {
+  id: ID;
+  performanceGoalId: ID;
+  version: number;
+  model: string;
+  summary: string;
+  gapExplanation: string;
+  recoveryGuidance: string;
+  caution: string;
+  generatedAt: string;
+  sessions: TrainingSession[];
+}
+
+export interface PerformanceGoalDetail {
+  goal: PerformanceGoal;
+  plan?: TrainingPlan;
+  milestones: PerformanceGoalMilestone[];
+}
+
+export interface PerformanceGoalMilestone {
+  id: ID;
+  performanceGoalId: ID;
+  sequence: number;
+  targetSeconds: number;
+  targetDate: string;
+  status: "pending" | "completed" | "missed";
+  completedWorkoutId?: ID;
+}
+
 export interface WorkoutHeartRatePoint {
   recordedAt: string;
   bpm: number;
@@ -134,6 +215,7 @@ export interface WorkoutSplit {
   startedAt: string;
   endedAt: string;
   isPartial: boolean;
+  averageHeartRateBPM?: number;
 }
 
 export interface WorkoutSplitsDetail {
@@ -147,10 +229,15 @@ export interface PersonalRecordAttempt {
   elapsedSeconds: number;
   paceSecondsPerKm: number;
   isPersonalBest: boolean;
+  isCurrentPersonalBest: boolean;
+  qualification: "standalone" | "measuredSplit" | "estimated";
+  splitIndex?: number;
 }
 
 export interface PersonalRecordDistance {
+  key: string;
   distanceMeters: number;
+  recordType: "standalone" | "split";
   totalAttempts: number;
   best?: PersonalRecordAttempt;
   latest?: PersonalRecordAttempt;
@@ -181,6 +268,32 @@ export interface Streak {
   currentDays: number;
   bestDays: number;
   updatedAt: string;
+}
+
+export interface GoalStreak {
+  goalId: ID;
+  userId: ID;
+  cadence: GoalCadence;
+  currentCount: number;
+  bestCount: number;
+  lastCompletedPeriod?: string;
+  updatedAt: string;
+}
+
+export interface GoalHistoryEntry {
+  periodStart: string;
+  periodEnd: string;
+  value: number;
+  target: number;
+  completed: boolean;
+  steps: number;
+  distanceMeters: number;
+  walkingDistanceMeters: number;
+  runningDistanceMeters: number;
+  activeMinutes: number;
+  calories: number;
+  strengthSessions: number;
+  strengthMinutes: number;
 }
 
 export interface ChallengeParticipant {
@@ -314,10 +427,34 @@ export interface AppNotification {
 export interface ProfileStats {
   userId: ID;
   lifetimeSteps: number;
+  lifetimeDistanceMeters: number;
+  activeDays: number;
+  workoutCount: number;
+  badgesEarned: number;
   challengeWins: number;
+  currentStreak: number;
   bestStreak: number;
   goalsHit: number;
   friendCount: number;
+}
+
+export interface ChallengeCareerStats {
+  userId: ID;
+  entered: number;
+  completed: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  active: number;
+  pendingInvites: number;
+  targetSuccesses: number;
+  cooperativeSuccesses: number;
+  teamWins: number;
+  podiumFinishes: number;
+  currentWinStreak: number;
+  bestWinStreak: number;
+  winRate: number;
+  favoriteKind?: ActivityKind;
 }
 
 export interface LeaderboardRow {
@@ -330,12 +467,14 @@ export interface LeaderboardRow {
   runningDistanceMeters: number;
   activeMinutes: number;
   calories: number;
+  strengthSessions: number;
   streakDays: number;
   goalsHit: number;
 }
 
 export interface ActivityComparison {
   period: LeaderboardPeriod;
+  metric: LeaderboardMetric;
   rows: LeaderboardRow[];
 }
 
@@ -395,29 +534,58 @@ export function leaderboardRows(input: {
   summaries: ActivitySummary[];
   goals: Goal[];
   streaks: Streak[];
+  workouts?: WorkoutSummary[];
   period: LeaderboardPeriod;
+  metric?: LeaderboardMetric;
   now?: string;
 }): LeaderboardRow[] {
   const filtered = filterSummariesForPeriod(input.summaries, input.period, input.now);
+  const metric = input.metric ?? "steps";
+  const allowedDates = new Set(filtered.map((summary) => summary.localDate));
+  const allTime = input.period === "all";
+  const strengthSessions = (userId: ID) => (input.workouts ?? []).filter((workout) =>
+    workout.userId === userId
+      && workout.activityType === "strengthTraining"
+      && (allTime || allowedDates.has(workout.startedAt.slice(0, 10)))
+  ).length;
+  const totals = (userId: ID) => {
+    const rows = filtered.filter((summary) => summary.userId === userId);
+    return {
+      steps: rows.reduce((sum, summary) => sum + summary.steps, 0),
+      totalDistanceMeters: rows.reduce((sum, summary) => sum + summary.walkingDistanceMeters + summary.runningDistanceMeters, 0),
+      walkingDistanceMeters: rows.reduce((sum, summary) => sum + summary.walkingDistanceMeters, 0),
+      runningDistanceMeters: rows.reduce((sum, summary) => sum + summary.runningDistanceMeters, 0),
+      activeMinutes: rows.reduce((sum, summary) => sum + summary.activeMinutes, 0),
+      calories: rows.reduce((sum, summary) => sum + summary.calories, 0),
+      strengthSessions: strengthSessions(userId)
+    };
+  };
+  const scoreFor = (values: ReturnType<typeof totals>) => {
+    switch (metric) {
+      case "distance": return values.totalDistanceMeters;
+      case "walking": return values.walkingDistanceMeters;
+      case "running": return values.runningDistanceMeters;
+      case "activeMinutes": return values.activeMinutes;
+      case "calories": return values.calories;
+      case "strengthSessions": return values.strengthSessions;
+      default: return values.steps;
+    }
+  };
   const ranked = rankUsers(
     input.userIds.map((userId) => ({
       userId,
-      score: filtered.filter((summary) => summary.userId === userId).reduce((sum, summary) => sum + summary.steps, 0)
+      score: scoreFor(totals(userId))
     }))
   );
 
   return ranked.map(({ userId, score, rank }) => {
     const userSummaries = filtered.filter((summary) => summary.userId === userId);
+    const values = totals(userId);
     return {
       userId,
       score,
       rank,
-      steps: score,
-      totalDistanceMeters: userSummaries.reduce((sum, summary) => sum + summary.walkingDistanceMeters + summary.runningDistanceMeters, 0),
-      walkingDistanceMeters: userSummaries.reduce((sum, summary) => sum + summary.walkingDistanceMeters, 0),
-      runningDistanceMeters: userSummaries.reduce((sum, summary) => sum + summary.runningDistanceMeters, 0),
-      activeMinutes: userSummaries.reduce((sum, summary) => sum + summary.activeMinutes, 0),
-      calories: userSummaries.reduce((sum, summary) => sum + summary.calories, 0),
+      ...values,
       streakDays: input.streaks.find((streak) => streak.userId === userId)?.currentDays ?? 0,
       goalsHit: countGoalsHit(input.goals.filter((goal) => goal.userId === userId), userSummaries)
     };

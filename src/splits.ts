@@ -18,6 +18,10 @@ export function normalizeWorkoutSplits(splits: WorkoutSplit[]): WorkoutSplit[] {
     const startedAt = new Date(split.startedAt);
     const endedAt = new Date(split.endedAt);
     if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(endedAt.getTime()) || endedAt <= startedAt) throw new Error("Invalid split timestamps");
+    if (split.averageHeartRateBPM !== undefined
+      && (!Number.isFinite(split.averageHeartRateBPM) || split.averageHeartRateBPM < 25 || split.averageHeartRateBPM > 250)) {
+      throw new Error("Split heart rate is outside the supported range");
+    }
     const key = `${split.unit}:${split.index}`;
     if (keys.has(key)) throw new Error("Duplicate workout split");
     keys.add(key);
@@ -27,7 +31,8 @@ export function normalizeWorkoutSplits(splits: WorkoutSplit[]): WorkoutSplit[] {
       durationSeconds: Math.round(split.durationSeconds * 10) / 10,
       paceSecondsPerKm: Math.round((split.durationSeconds / (split.distanceMeters / 1_000)) * 10) / 10,
       startedAt: startedAt.toISOString(),
-      endedAt: endedAt.toISOString()
+      endedAt: endedAt.toISOString(),
+      averageHeartRateBPM: split.averageHeartRateBPM === undefined ? undefined : Math.round(split.averageHeartRateBPM * 10) / 10
     };
   }).sort((a, b) => a.unit.localeCompare(b.unit) || a.index - b.index);
 }

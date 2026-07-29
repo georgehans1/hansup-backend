@@ -21,7 +21,7 @@ import {
   UserSettings,
   WorkoutSummary
 } from "./domain.js";
-import type { WorkoutHeartRateDetail, WorkoutHeartRatePoint, WorkoutSplit, WorkoutSplitsDetail } from "./domain.js";
+import type { PerformanceGoal, PerformanceGoalAnalysis, PerformanceGoalDetail, TrainingPlan, TrainingSession, WorkoutHeartRateDetail, WorkoutHeartRatePoint, WorkoutSplit, WorkoutSplitsDetail } from "./domain.js";
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 type TransactionFn = (work: (query: QueryFn) => Promise<void>) => Promise<void>;
@@ -79,7 +79,16 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     const summaries = (await this.query("select * from activity_summaries order by local_date")).rows.map(mapSummary);
     const workouts = (await this.query("select * from workout_summaries order by started_at")).rows.map(mapWorkout);
     const goals = (await this.query("select * from goals")).rows.map(mapGoal);
-    const goalVersions = (await this.query("select * from goal_versions order by effective_date")).rows.map((row) => ({ goalId: row.goal_id, userId: row.user_id, kind: row.kind, target: row.target, effectiveDate: dateString(row.effective_date).slice(0, 10) }));
+    const goalVersions = (await this.query("select * from goal_versions order by effective_date")).rows.map((row) => ({ goalId: row.goal_id, userId: row.user_id, kind: row.kind, cadence: row.cadence, target: row.target, effectiveDate: dateString(row.effective_date).slice(0, 10) }));
+    const goalStreaks = (await this.query("select * from goal_streaks")).rows.map((row) => ({
+      goalId: row.goal_id,
+      userId: row.user_id,
+      cadence: row.cadence,
+      currentCount: row.current_count,
+      bestCount: row.best_count,
+      lastCompletedPeriod: row.last_completed_period ? dateString(row.last_completed_period).slice(0, 10) : undefined,
+      updatedAt: dateString(row.updated_at)
+    }));
     const streaks = (await this.query("select * from streaks")).rows.map(mapStreak);
     const challenges = (await this.query("select * from challenges")).rows.map(mapChallenge);
     const participants = (await this.query("select * from challenge_participants")).rows;
@@ -130,6 +139,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       workouts,
       goals,
       goalVersions,
+      goalStreaks,
       streaks,
       challenges,
       feed,
@@ -149,12 +159,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     await this.clearDomainTables();
 
     for (const user of store.users) await this.insertUser(user);
-    for (const settings of store.settings) await this.insertSettings(settings);
     for (const friendship of store.friendships) await this.insertFriendship(friendship);
     for (const summary of store.summaries) await this.insertSummary(summary);
     for (const workout of store.workouts) await this.insertWorkout(workout);
     for (const goal of store.goals) await this.insertGoal(goal);
+    for (const settings of store.settings) await this.insertSettings(settings);
     for (const version of store.goalVersions) await this.insertGoalVersion(version);
+    for (const streak of store.goalStreaks) await this.insertGoalStreak(streak);
     for (const streak of store.streaks) await this.insertStreak(streak);
     for (const badge of store.badges) await this.insertBadge(badge);
     for (const userBadge of store.userBadges) await this.insertUserBadge(userBadge);
@@ -207,11 +218,11 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
     switch (change.kind) {
       case "auth": {
         await this.insertUser(required(store.users.find((item) => item.id === change.userId), "User"));
+        for (const goal of store.goals.filter((item) => item.userId === change.userId)) await this.insertGoal(goal);
         const settings = store.settings.find((item) => item.userId === change.userId);
         if (settings) await this.insertSettings(settings);
-        const streak = store.streaks.find((item) => item.userId === change.userId);
-        if (streak) await this.insertStreak(streak);
-        for (const goal of store.goals.filter((item) => item.userId === change.userId)) await this.insertGoal(goal);
+        for (const version of store.goalVersions.filter((item) => item.userId === change.userId)) await this.insertGoalVersion(version);
+        await this.persistDerivedActivity(store, change.userId);
         return;
       }
       case "notifications":
@@ -424,9 +435,9 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       await query("delete from workout_splits where workout_id = $1", [workoutId]);
       for (const split of splits) {
         await query(
-          `insert into workout_splits (workout_id, unit, split_index, distance_meters, duration_seconds, pace_seconds_per_km, started_at, ended_at, is_partial, updated_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [workoutId, split.unit, split.index, split.distanceMeters, split.durationSeconds, split.paceSecondsPerKm, split.startedAt, split.endedAt, split.isPartial, updatedAt]
+          `insert into workout_splits (workout_id, unit, split_index, distance_meters, duration_seconds, pace_seconds_per_km, started_at, ended_at, is_partial, average_heart_rate_bpm, updated_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [workoutId, split.unit, split.index, split.distanceMeters, split.durationSeconds, split.paceSecondsPerKm, split.startedAt, split.endedAt, split.isPartial, split.averageHeartRateBPM ?? null, updatedAt]
         );
       }
     });
@@ -441,6 +452,236 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   async seedBadges(badges: Badge[]): Promise<void> {
     for (const badge of badges) await this.insertBadge(badge);
+  }
+
+  async performanceGoalsFor(userId: string): Promise<PerformanceGoalDetail[]> {
+    const rows = (await this.query("select * from performance_goals where user_id = $1 order by created_at desc", [userId])).rows;
+    return Promise.all(rows.map(async (row) => this.performanceGoalDetailFromRow(row)));
+  }
+
+  async performanceGoalFor(userId: string, goalId: string): Promise<PerformanceGoalDetail | undefined> {
+    const row = (await this.query("select * from performance_goals where id = $1 and user_id = $2", [goalId, userId])).rows[0];
+    return row ? this.performanceGoalDetailFromRow(row) : undefined;
+  }
+
+  async createPerformanceGoal(userId: string, input: {
+    distanceMeters: number; targetSeconds: number; targetDate: string;
+    trainingDaysPerWeek: number; preferredLongRunDay: number; consentVersion: string; baselineWorkoutId?: string;
+  }): Promise<PerformanceGoalDetail> {
+    if (![1000, 2000, 3000, 4000, 5000, 10000, 21097.5].includes(input.distanceMeters)) throw new Error("Unsupported performance distance");
+    if (input.targetSeconds <= 0 || input.trainingDaysPerWeek < 2 || input.trainingDaysPerWeek > 7) throw new Error("Invalid performance goal");
+    if ((await this.query("select 1 from performance_goals where user_id = $1 and status = 'active'", [userId])).rows.length) throw new Error("Complete or archive your active performance goal first");
+    const id = generatedId("pg");
+    let analysis = await this.performanceAnalysis(userId, input.distanceMeters, input.targetSeconds);
+    let baselineSeconds: number | undefined;
+    if (input.baselineWorkoutId) {
+      const tolerance = Math.max(75, input.distanceMeters * 0.015);
+      const selected = (await this.query(
+        `select * from workout_summaries where id = $1 and user_id = $2 and activity_type = 'running'
+         and abs(distance_meters - $3) <= $4`,
+        [input.baselineWorkoutId, userId, input.distanceMeters, tolerance]
+      )).rows[0];
+      if (!selected) throw new Error("Selected baseline run does not qualify for this distance");
+      baselineSeconds = Math.round(Number(selected.duration_seconds));
+      analysis = {
+        ...analysis,
+        currentBestSeconds: baselineSeconds,
+        currentPaceSecondsPerKm: Math.round(baselineSeconds / (input.distanceMeters / 1000)),
+        timeGapSeconds: baselineSeconds - input.targetSeconds,
+        qualifyingWorkoutId: selected.id,
+        feasibility: performanceFeasibility(baselineSeconds, input.targetSeconds)
+      };
+    }
+    await this.query(
+      `insert into performance_goals (id,user_id,distance_meters,target_seconds,target_date,training_days_per_week,preferred_long_run_day,status,consent_version,baseline_seconds,baseline_workout_id,analysis)
+       values ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11)`,
+      [id, userId, input.distanceMeters, input.targetSeconds, input.targetDate, input.trainingDaysPerWeek, input.preferredLongRunDay, input.consentVersion, baselineSeconds ?? null, input.baselineWorkoutId ?? null, JSON.stringify(analysis)]
+    );
+    const milestoneBaselineSeconds = baselineSeconds ?? Math.round(input.targetSeconds * 1.2);
+    const start = new Date();
+    const end = new Date(`${input.targetDate}T12:00:00Z`);
+    for (let sequence = 1; sequence <= 3; sequence++) {
+      const fraction = sequence / 3;
+      const milestoneSeconds = Math.round(milestoneBaselineSeconds - (milestoneBaselineSeconds - input.targetSeconds) * fraction);
+      const milestoneDate = new Date(start.getTime() + (end.getTime() - start.getTime()) * fraction).toISOString().slice(0, 10);
+      await this.query(
+        "insert into performance_goal_milestones (id,performance_goal_id,sequence,target_seconds,target_date) values ($1,$2,$3,$4,$5)",
+        [generatedId("pm"), id, sequence, milestoneSeconds, milestoneDate]
+      );
+    }
+    return (await this.performanceGoalFor(userId, id))!;
+  }
+
+  async updatePerformanceGoalStatus(userId: string, goalId: string, status: string): Promise<PerformanceGoalDetail> {
+    if (!["completed", "abandoned", "archived"].includes(status)) throw new Error("Invalid performance goal status");
+    const row = (await this.query(
+      "update performance_goals set status = $1, updated_at = now() where id = $2 and user_id = $3 returning *",
+      [status, goalId, userId]
+    )).rows[0];
+    if (!row) throw new Error("Performance goal not found");
+    return this.performanceGoalDetailFromRow(row);
+  }
+
+  async refreshPerformanceGoalAnalysis(userId: string, goalId: string): Promise<PerformanceGoalDetail> {
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail) throw new Error("Performance goal not found");
+    const analysis = await this.performanceAnalysis(userId, detail.goal.distanceMeters, detail.goal.targetSeconds, detail.goal.createdAt, detail.goal.baselineSeconds, detail.goal.baselineWorkoutId);
+    if (analysis.currentBestSeconds != null) {
+      await this.query(
+        `update performance_goal_milestones set status = 'completed', completed_workout_id = $1
+         where performance_goal_id = $2 and status = 'pending' and target_seconds >= $3`,
+        [analysis.qualifyingWorkoutId ?? null, goalId, analysis.currentBestSeconds]
+      );
+    }
+    await this.query(
+      "update performance_goal_milestones set status = 'missed' where performance_goal_id = $1 and status = 'pending' and target_date < current_date",
+      [goalId]
+    );
+    const row = (await this.query("update performance_goals set analysis = $1, updated_at = now() where id = $2 returning *", [JSON.stringify(analysis), goalId])).rows[0];
+    return this.performanceGoalDetailFromRow(row);
+  }
+
+  async saveTrainingPlan(goalId: string, model: string, content: Omit<TrainingPlan, "id" | "performanceGoalId" | "version" | "model" | "generatedAt" | "sessions"> & { sessions: Array<Omit<TrainingSession, "id" | "planId" | "status">> }): Promise<TrainingPlan> {
+    const latest = (await this.query("select generated_at from training_plans where performance_goal_id = $1 order by version desc limit 1", [goalId])).rows[0];
+    if (latest && Date.now() - Date.parse(latest.generated_at) < 15 * 60_000) throw new Error("Your plan was updated recently. Try again in a few minutes.");
+    const version = Number((await this.query("select coalesce(max(version),0)+1 as version from training_plans where performance_goal_id = $1", [goalId])).rows[0].version);
+    const planId = generatedId("tp");
+    await this.transaction(async (query) => {
+      await query(
+        `insert into training_plans (id,performance_goal_id,version,model,summary,gap_explanation,recovery_guidance,caution)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [planId, goalId, version, model, content.summary, content.gapExplanation, content.recoveryGuidance, content.caution]
+      );
+      for (const session of content.sessions) {
+        await query(
+          `insert into training_sessions (id,plan_id,scheduled_date,type,title,purpose,distance_meters,duration_seconds,effort)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [generatedId("ts"), planId, session.scheduledDate, session.type, session.title, session.purpose, session.distanceMeters ?? null, session.durationSeconds ?? null, session.effort]
+        );
+      }
+    });
+    return (await this.trainingPlanForGoal(goalId))!;
+  }
+
+  async updateTrainingSession(userId: string, sessionId: string, patch: { scheduledDate?: string; status?: string }): Promise<TrainingSession> {
+    if (patch.status && !["scheduled", "completed", "skipped"].includes(patch.status)) throw new Error("Invalid session status");
+    const row = (await this.query(
+      `update training_sessions s set scheduled_date = coalesce($1, s.scheduled_date), status = coalesce($2, s.status)
+       from training_plans p join performance_goals g on g.id = p.performance_goal_id
+       where s.plan_id = p.id and s.id = $3 and g.user_id = $4 returning s.*`,
+      [patch.scheduledDate ?? null, patch.status ?? null, sessionId, userId]
+    )).rows[0];
+    if (!row) throw new Error("Training session not found");
+    return mapTrainingSession(row);
+  }
+
+  async deleteCoachingData(userId: string, goalId: string): Promise<void> {
+    const owned = (await this.query("select 1 from performance_goals where id = $1 and user_id = $2", [goalId, userId])).rows.length > 0;
+    if (!owned) throw new Error("Performance goal not found");
+    await this.query("delete from training_plans where performance_goal_id = $1", [goalId]);
+    await this.query("delete from coach_generations where performance_goal_id = $1", [goalId]);
+  }
+
+  async beginCoachGeneration(userId: string, goalId: string, model: string, reason: string): Promise<string> {
+    const detail = await this.performanceGoalFor(userId, goalId);
+    if (!detail) throw new Error("Performance goal not found");
+    const recent = (await this.query("select generated_at from training_plans where performance_goal_id = $1 order by version desc limit 1", [goalId])).rows[0];
+    if (recent && Date.now() - Date.parse(recent.generated_at) < 15 * 60_000) throw new Error("Your plan was updated recently. Try again in a few minutes.");
+    const id = generatedId("cg");
+    const fingerprint = `${detail.goal.updatedAt}:${detail.goal.analysis.generatedAt}:${model}`;
+    await this.query(
+      "insert into coach_generations (id,performance_goal_id,input_fingerprint,reason,status,model) values ($1,$2,$3,$4,'running',$5)",
+      [id, goalId, fingerprint, reason, model]
+    );
+    return id;
+  }
+
+  async finishCoachGeneration(id: string, failure?: string): Promise<void> {
+    await this.query(
+      "update coach_generations set status = $1, failure_reason = $2, completed_at = now() where id = $3",
+      [failure ? "failed" : "completed", failure ?? null, id]
+    );
+  }
+
+  private async performanceAnalysis(userId: string, distanceMeters: number, targetSeconds: number, since?: string, baselineSeconds?: number, baselineWorkoutId?: string): Promise<PerformanceGoalAnalysis> {
+    const tolerance = Math.max(75, distanceMeters * 0.015);
+    const qualifying = (await this.query(
+      `select * from workout_summaries where user_id = $1 and activity_type = 'running'
+       and abs(distance_meters - $2) <= $3 and ($4::timestamptz is null or started_at >= $4::timestamptz)
+       order by duration_seconds asc`,
+      [userId, distanceMeters, tolerance, since ?? null]
+    )).rows;
+    const recent = (await this.query(
+      `select duration_seconds,distance_meters from workout_summaries where user_id = $1 and activity_type = 'running'
+       and started_at >= now() - interval '28 days' order by started_at desc`,
+      [userId]
+    )).rows;
+    const best = qualifying[0];
+    const latest = qualifying.slice().sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0];
+    const measuredBest = best ? Math.round(Number(best.duration_seconds)) : undefined;
+    const currentBestSeconds = baselineSeconds == null ? measuredBest : measuredBest == null ? baselineSeconds : Math.min(baselineSeconds, measuredBest);
+    const gap = currentBestSeconds == null ? undefined : currentBestSeconds - targetSeconds;
+    const improvement = best && latest ? Math.max(0, Math.round(Number(latest.duration_seconds) - Number(best.duration_seconds))) : undefined;
+    const ratio = gap == null ? undefined : gap / targetSeconds;
+    const splitRows = best ? (await this.query(
+      "select pace_seconds_per_km, split_index from workout_splits where workout_id = $1 and unit = 'kilometer' and is_partial = false order by split_index",
+      [best.id]
+    )).rows : [];
+    const paces = splitRows.map((row) => Number(row.pace_seconds_per_km));
+    const splitAverage = paces.length ? paces.reduce((sum, value) => sum + value, 0) / paces.length : undefined;
+    const splitVariation = splitAverage == null ? undefined : Math.sqrt(paces.reduce((sum, value) => sum + Math.pow(value - splitAverage, 2), 0) / paces.length);
+    const midpoint = Math.floor(paces.length / 2);
+    const firstHalf = midpoint ? paces.slice(0, midpoint).reduce((sum, value) => sum + value, 0) / midpoint : undefined;
+    const secondValues = paces.slice(midpoint);
+    const secondHalf = secondValues.length ? secondValues.reduce((sum, value) => sum + value, 0) / secondValues.length : undefined;
+    const heartRate = best ? (await this.query("select average_bpm from workout_heart_rate_summaries where workout_id = $1", [best.id])).rows[0] : undefined;
+    return {
+      currentBestSeconds,
+      targetSeconds,
+      requiredPaceSecondsPerKm: Math.round(targetSeconds / (distanceMeters / 1000)),
+      currentPaceSecondsPerKm: currentBestSeconds == null ? undefined : Math.round(currentBestSeconds / (distanceMeters / 1000)),
+      timeGapSeconds: gap,
+      recentWeeklyDistanceMeters: recent.reduce((sum, row) => sum + Number(row.distance_meters), 0) / 4,
+      recentRuns: recent.length,
+      improvementSeconds: improvement,
+      splitVariationSeconds: splitVariation == null ? undefined : Math.round(splitVariation),
+      lateRunSlowdownSeconds: firstHalf == null || secondHalf == null ? undefined : Math.round(secondHalf - firstHalf),
+      averageHeartRateBPM: heartRate ? Math.round(Number(heartRate.average_bpm)) : undefined,
+      feasibility: ratio == null ? "insufficientData" : ratio <= 0 ? "onTrack" : ratio <= 0.08 ? "onTrack" : ratio <= 0.2 ? "ambitious" : "stretch",
+      qualifyingWorkoutId: measuredBest != null && measuredBest <= (baselineSeconds ?? Number.MAX_SAFE_INTEGER) ? best?.id : baselineWorkoutId,
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  private async trainingPlanForGoal(goalId: string): Promise<TrainingPlan | undefined> {
+    const plan = (await this.query("select * from training_plans where performance_goal_id = $1 order by version desc limit 1", [goalId])).rows[0];
+    if (!plan) return undefined;
+    const sessions = (await this.query("select * from training_sessions where plan_id = $1 order by scheduled_date,id", [plan.id])).rows.map(mapTrainingSession);
+    return {
+      id: plan.id, performanceGoalId: plan.performance_goal_id, version: Number(plan.version), model: plan.model,
+      summary: plan.summary, gapExplanation: plan.gap_explanation, recoveryGuidance: plan.recovery_guidance,
+      caution: plan.caution, generatedAt: dateString(plan.generated_at), sessions
+    };
+  }
+
+  private async performanceGoalDetailFromRow(row: any): Promise<PerformanceGoalDetail> {
+    const goal: PerformanceGoal = {
+      id: row.id, userId: row.user_id, distanceMeters: Number(row.distance_meters), targetSeconds: Number(row.target_seconds),
+      targetDate: dateString(row.target_date).slice(0, 10), trainingDaysPerWeek: Number(row.training_days_per_week),
+      preferredLongRunDay: Number(row.preferred_long_run_day), status: row.status, consentVersion: row.consent_version,
+      baselineSeconds: row.baseline_seconds == null ? undefined : Number(row.baseline_seconds),
+      baselineWorkoutId: row.baseline_workout_id ?? undefined,
+      analysis: row.analysis as PerformanceGoalAnalysis, createdAt: dateString(row.created_at), updatedAt: dateString(row.updated_at)
+    };
+    const milestones = (await this.query(
+      "select * from performance_goal_milestones where performance_goal_id = $1 order by sequence",
+      [goal.id]
+    )).rows.map((item) => ({
+      id: item.id, performanceGoalId: item.performance_goal_id, sequence: Number(item.sequence),
+      targetSeconds: Number(item.target_seconds), targetDate: dateString(item.target_date).slice(0, 10),
+      status: item.status, completedWorkoutId: item.completed_workout_id ?? undefined
+    }));
+    return { goal, plan: await this.trainingPlanForGoal(goal.id), milestones };
   }
 
   private async ensureRuntimeTables() {
@@ -495,8 +736,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       {
         id: "009_goal_versions",
         statements: [
-          "create table if not exists goal_versions (goal_id text not null references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, kind text not null, target double precision not null, effective_date date not null, primary key(goal_id, effective_date))",
-          "insert into goal_versions (goal_id, user_id, kind, target, effective_date) select id, user_id, kind, target, created_at::date from goals on conflict do nothing"
+          "create table if not exists goal_versions (goal_id text not null references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, kind text not null, cadence text, target double precision not null, effective_date date not null, primary key(goal_id, effective_date))",
+          "insert into goal_versions (goal_id, user_id, kind, cadence, target, effective_date) select id, user_id, kind, cadence, target, created_at::date from goals on conflict do nothing"
         ]
       },
       {
@@ -521,7 +762,49 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       {
         id: "013_workout_splits",
         statements: [
-          "create table if not exists workout_splits (workout_id text not null references workout_summaries(id) on delete cascade, unit text not null check (unit in ('kilometer', 'mile')), split_index integer not null, distance_meters double precision not null, duration_seconds double precision not null, pace_seconds_per_km double precision not null, started_at timestamptz not null, ended_at timestamptz not null, is_partial boolean not null default false, updated_at timestamptz not null default now(), primary key(workout_id, unit, split_index))"
+          "create table if not exists workout_splits (workout_id text not null references workout_summaries(id) on delete cascade, unit text not null check (unit in ('kilometer', 'mile')), split_index integer not null, distance_meters double precision not null, duration_seconds double precision not null, pace_seconds_per_km double precision not null, started_at timestamptz not null, ended_at timestamptz not null, is_partial boolean not null default false, average_heart_rate_bpm double precision, updated_at timestamptz not null default now(), primary key(workout_id, unit, split_index))"
+        ]
+      },
+      {
+        id: "014_split_heart_rate",
+        statements: [
+          "alter table workout_splits add column if not exists average_heart_rate_bpm double precision"
+        ]
+      },
+      {
+        id: "015_goal_streaks_home_goal",
+        statements: [
+          "alter table user_settings add column if not exists home_goal_id text",
+          "alter table goal_versions add column if not exists cadence text",
+          "update goal_versions set cadence = goals.cadence from goals where goal_versions.goal_id = goals.id and goal_versions.cadence is null",
+          "alter table goal_versions alter column cadence set not null",
+          "create table if not exists goal_streaks (goal_id text primary key references goals(id) on delete cascade, user_id text not null references users(id) on delete cascade, cadence text not null, current_count integer not null default 0, best_count integer not null default 0, last_completed_period date, updated_at timestamptz not null default now())",
+          "create index if not exists goal_streaks_user_idx on goal_streaks(user_id)",
+          "do $$ begin if not exists (select 1 from pg_constraint where conname = 'user_settings_home_goal_id_fkey') then alter table user_settings add constraint user_settings_home_goal_id_fkey foreign key (home_goal_id) references goals(id) on delete set null; end if; end $$"
+        ]
+      },
+      {
+        id: "016_performance_coaching",
+        statements: [
+          "create table if not exists performance_goals (id text primary key, user_id text not null references users(id) on delete cascade, distance_meters double precision not null, target_seconds integer not null, target_date date not null, training_days_per_week integer not null, preferred_long_run_day integer not null, status text not null check (status in ('active','completed','abandoned','archived')), consent_version text not null, baseline_seconds integer, baseline_workout_id text references workout_summaries(id) on delete set null, analysis jsonb not null default '{}'::jsonb, created_at timestamptz not null default now(), updated_at timestamptz not null default now())",
+          "create unique index if not exists performance_goals_one_active_per_user on performance_goals(user_id) where status = 'active'",
+          "create table if not exists performance_goal_milestones (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, sequence integer not null, target_seconds integer not null, target_date date not null, status text not null default 'pending' check (status in ('pending','completed','missed')), completed_workout_id text references workout_summaries(id) on delete set null, unique(performance_goal_id,sequence))",
+          "create table if not exists training_plans (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, version integer not null, model text not null, summary text not null, gap_explanation text not null, recovery_guidance text not null, caution text not null, generated_at timestamptz not null default now(), unique(performance_goal_id,version))",
+          "create table if not exists training_sessions (id text primary key, plan_id text not null references training_plans(id) on delete cascade, scheduled_date date not null, type text not null, title text not null, purpose text not null, distance_meters double precision, duration_seconds integer, effort text not null, status text not null default 'scheduled' check (status in ('scheduled','completed','skipped')), linked_workout_id text references workout_summaries(id) on delete set null)",
+          "create table if not exists coach_generations (id text primary key, performance_goal_id text not null references performance_goals(id) on delete cascade, input_fingerprint text not null, reason text not null, status text not null, model text not null, failure_reason text, created_at timestamptz not null default now(), completed_at timestamptz)"
+        ]
+      },
+      {
+        id: "017_performance_goal_baseline",
+        statements: [
+          "alter table performance_goals add column if not exists baseline_seconds integer",
+          "update performance_goals set baseline_seconds = nullif((analysis->>'currentBestSeconds')::integer, 0) where baseline_seconds is null and analysis ? 'currentBestSeconds'"
+        ]
+      },
+      {
+        id: "018_performance_goal_baseline_workout",
+        statements: [
+          "alter table performance_goals add column if not exists baseline_workout_id text references workout_summaries(id) on delete set null"
         ]
       }
     ];
@@ -549,6 +832,7 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
        delete from user_badges;
        delete from badges;
        delete from streaks;
+       delete from goal_streaks;
        delete from goal_versions;
        delete from goals;
        delete from workout_summaries;
@@ -573,8 +857,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   }
 
   private async persistDerivedActivity(store: AppStore, userId: string) {
+    const settings = store.settings.find((item) => item.userId === userId);
+    if (settings) await this.insertSettings(settings);
     const streak = store.streaks.find((item) => item.userId === userId);
     if (streak) await this.insertStreak(streak);
+    for (const goalStreak of store.goalStreaks.filter((item) => item.userId === userId)) {
+      await this.insertGoalStreak(goalStreak);
+    }
     for (const badge of store.userBadges.filter((item) => item.userId === userId)) {
       await this.insertUserBadge(badge);
     }
@@ -656,12 +945,13 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
   private insertSettings(settings: UserSettings) {
     return this.query(
       `insert into user_settings
-        (user_id, hide_activity_from_friends, hide_exact_numbers, searchable, push_messages, push_friend_requests, push_challenges, push_milestones)
-       values ($1, $2, $3, $4, $5, $6, $7, $8)
+        (user_id, home_goal_id, hide_activity_from_friends, hide_exact_numbers, searchable, push_messages, push_friend_requests, push_challenges, push_milestones)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        on conflict (user_id) do update set hide_activity_from_friends = excluded.hide_activity_from_friends,
+         home_goal_id = excluded.home_goal_id,
          hide_exact_numbers = excluded.hide_exact_numbers, searchable = excluded.searchable, push_messages = excluded.push_messages,
          push_friend_requests = excluded.push_friend_requests, push_challenges = excluded.push_challenges, push_milestones = excluded.push_milestones`,
-      [settings.userId, settings.hideActivityFromFriends, settings.hideExactNumbers, settings.searchable, settings.pushMessages, settings.pushFriendRequests, settings.pushChallenges, settings.pushMilestones]
+      [settings.userId, settings.homeGoalId, settings.hideActivityFromFriends, settings.hideExactNumbers, settings.searchable, settings.pushMessages, settings.pushFriendRequests, settings.pushChallenges, settings.pushMilestones]
     );
   }
 
@@ -695,8 +985,18 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   private insertGoalVersion(version: AppStore["goalVersions"][number]) {
     return this.query(
-      "insert into goal_versions (goal_id, user_id, kind, target, effective_date) values ($1, $2, $3, $4, $5) on conflict (goal_id, effective_date) do update set kind = excluded.kind, target = excluded.target",
-      [version.goalId, version.userId, version.kind, version.target, version.effectiveDate]
+      "insert into goal_versions (goal_id, user_id, kind, cadence, target, effective_date) values ($1, $2, $3, $4, $5, $6) on conflict (goal_id, effective_date) do update set kind = excluded.kind, cadence = excluded.cadence, target = excluded.target",
+      [version.goalId, version.userId, version.kind, version.cadence, version.target, version.effectiveDate]
+    );
+  }
+
+  private insertGoalStreak(streak: AppStore["goalStreaks"][number]) {
+    return this.query(
+      `insert into goal_streaks (goal_id, user_id, cadence, current_count, best_count, last_completed_period, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (goal_id) do update set cadence = excluded.cadence, current_count = excluded.current_count,
+         best_count = excluded.best_count, last_completed_period = excluded.last_completed_period, updated_at = excluded.updated_at`,
+      [streak.goalId, streak.userId, streak.cadence, streak.currentCount, streak.bestCount, streak.lastCompletedPeriod, streak.updatedAt]
     );
   }
 
@@ -812,7 +1112,7 @@ export async function createProductionSeedStore(databaseUrl?: string, useDemoDat
   return store;
 }
 
-export async function createProductionContext(databaseUrl?: string, useDemoData = false): Promise<{ store: AppStore; persist: (change: PersistenceChange) => Promise<void>; heartRate: WorkoutHeartRateRepository; splits: WorkoutSplitRepository }> {
+export async function createProductionContext(databaseUrl?: string, useDemoData = false): Promise<{ store: AppStore; persist: (change: PersistenceChange) => Promise<void>; heartRate: WorkoutHeartRateRepository; splits: WorkoutSplitRepository; performanceGoals?: PostgresRepository }> {
   if (!databaseUrl) {
     const store = useDemoData ? createDemoStore() : createEmptyStore();
     return { store, persist: async () => {}, heartRate: new InMemoryWorkoutHeartRateRepository(), splits: new InMemoryWorkoutSplitRepository() };
@@ -837,7 +1137,8 @@ export async function createProductionContext(databaseUrl?: string, useDemoData 
     store,
     persist: (change) => repository.persistChange(store, change),
     heartRate: repository,
-    splits: repository
+    splits: repository,
+    performanceGoals: repository
   };
 }
 
@@ -859,9 +1160,29 @@ function mapWorkoutSplits(workoutId: string, rows: any[]): WorkoutSplitsDetail {
     updatedAt: rows.reduce((latest, row) => latest > dateString(row.updated_at) ? latest : dateString(row.updated_at), ""),
     splits: rows.map((row) => ({
       index: Number(row.split_index), unit: row.unit, distanceMeters: Number(row.distance_meters), durationSeconds: Number(row.duration_seconds),
-      paceSecondsPerKm: Number(row.pace_seconds_per_km), startedAt: dateString(row.started_at), endedAt: dateString(row.ended_at), isPartial: Boolean(row.is_partial)
+      paceSecondsPerKm: Number(row.pace_seconds_per_km), startedAt: dateString(row.started_at), endedAt: dateString(row.ended_at), isPartial: Boolean(row.is_partial),
+      averageHeartRateBPM: row.average_heart_rate_bpm == null ? undefined : Number(row.average_heart_rate_bpm)
     }))
   };
+}
+
+function mapTrainingSession(row: any): TrainingSession {
+  return {
+    id: row.id, planId: row.plan_id, scheduledDate: dateString(row.scheduled_date).slice(0, 10),
+    type: row.type, title: row.title, purpose: row.purpose,
+    distanceMeters: row.distance_meters == null ? undefined : Number(row.distance_meters),
+    durationSeconds: row.duration_seconds == null ? undefined : Number(row.duration_seconds),
+    effort: row.effort, status: row.status, linkedWorkoutId: row.linked_workout_id ?? undefined
+  };
+}
+
+function generatedId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function performanceFeasibility(currentSeconds: number, targetSeconds: number): PerformanceGoalAnalysis["feasibility"] {
+  const ratio = (currentSeconds - targetSeconds) / targetSeconds;
+  return ratio <= 0.08 ? "onTrack" : ratio <= 0.2 ? "ambitious" : "stretch";
 }
 
 function mapUser(row: any): User {
@@ -881,6 +1202,7 @@ function mapUser(row: any): User {
 function mapSettings(row: any): UserSettings {
   return {
     userId: row.user_id,
+    homeGoalId: row.home_goal_id ?? undefined,
     hideActivityFromFriends: row.hide_activity_from_friends,
     hideExactNumbers: row.hide_exact_numbers,
     searchable: row.searchable,

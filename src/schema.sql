@@ -31,6 +31,7 @@ CREATE TABLE sessions (
 
 CREATE TABLE user_settings (
   user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  home_goal_id text,
   hide_activity_from_friends boolean NOT NULL DEFAULT false,
   hide_exact_numbers boolean NOT NULL DEFAULT false,
   searchable boolean NOT NULL DEFAULT true,
@@ -112,6 +113,7 @@ CREATE TABLE workout_splits (
   started_at timestamptz NOT NULL,
   ended_at timestamptz NOT NULL,
   is_partial boolean NOT NULL DEFAULT false,
+  average_heart_rate_bpm double precision,
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workout_id, unit, split_index)
 );
@@ -130,9 +132,89 @@ CREATE TABLE goal_versions (
   goal_id text NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind text NOT NULL,
+  cadence text NOT NULL,
   target double precision NOT NULL,
   effective_date date NOT NULL,
   PRIMARY KEY (goal_id, effective_date)
+);
+
+CREATE TABLE goal_streaks (
+  goal_id text PRIMARY KEY REFERENCES goals(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  cadence text NOT NULL,
+  current_count integer NOT NULL DEFAULT 0,
+  best_count integer NOT NULL DEFAULT 0,
+  last_completed_period date,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE performance_goals (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  distance_meters double precision NOT NULL,
+  target_seconds integer NOT NULL,
+  target_date date NOT NULL,
+  training_days_per_week integer NOT NULL,
+  preferred_long_run_day integer NOT NULL,
+  status text NOT NULL CHECK (status IN ('active', 'completed', 'abandoned', 'archived')),
+  consent_version text NOT NULL,
+  baseline_seconds integer,
+  baseline_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL,
+  analysis jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX performance_goals_one_active_per_user ON performance_goals(user_id) WHERE status = 'active';
+
+CREATE TABLE performance_goal_milestones (
+  id text PRIMARY KEY,
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  sequence integer NOT NULL,
+  target_seconds integer NOT NULL,
+  target_date date NOT NULL,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'missed')),
+  completed_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL,
+  UNIQUE(performance_goal_id, sequence)
+);
+
+CREATE TABLE training_plans (
+  id text PRIMARY KEY,
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  version integer NOT NULL,
+  model text NOT NULL,
+  summary text NOT NULL,
+  gap_explanation text NOT NULL,
+  recovery_guidance text NOT NULL,
+  caution text NOT NULL,
+  generated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(performance_goal_id, version)
+);
+
+CREATE TABLE training_sessions (
+  id text PRIMARY KEY,
+  plan_id text NOT NULL REFERENCES training_plans(id) ON DELETE CASCADE,
+  scheduled_date date NOT NULL,
+  type text NOT NULL,
+  title text NOT NULL,
+  purpose text NOT NULL,
+  distance_meters double precision,
+  duration_seconds integer,
+  effort text NOT NULL,
+  status text NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'completed', 'skipped')),
+  linked_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL
+);
+
+CREATE TABLE coach_generations (
+  id text PRIMARY KEY,
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  input_fingerprint text NOT NULL,
+  reason text NOT NULL,
+  status text NOT NULL,
+  model text NOT NULL,
+  failure_reason text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz
 );
 
 CREATE TABLE streaks (

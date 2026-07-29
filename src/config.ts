@@ -10,6 +10,8 @@ export interface ProductionConfig {
   apnsBundleId?: string;
   apnsPrivateKey?: string;
   apnsSandbox: boolean;
+  geminiApiKey?: string;
+  geminiModel?: string;
 }
 
 export function productionConfig(env: Record<string, string | undefined> = process.env): ProductionConfig {
@@ -24,7 +26,9 @@ export function productionConfig(env: Record<string, string | undefined> = proce
     apnsKeyId: env.APNS_KEY_ID,
     apnsBundleId: env.APNS_BUNDLE_ID,
     apnsPrivateKey: env.APNS_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-    apnsSandbox: env.APNS_SANDBOX !== "false"
+    apnsSandbox: env.APNS_SANDBOX !== "false",
+    geminiApiKey: env.GEMINI_API_KEY,
+    geminiModel: env.GEMINI_MODEL ?? "gemini-2.5-flash"
   };
 }
 
