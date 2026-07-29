@@ -119,24 +119,24 @@ export function updateWorkoutSocialMetadata(
   return workout;
 }
 
-export function toggleWorkoutReaction(store: AppStore, userId: ID, workoutId: ID, kind: ReactionKind): Reaction[] {
+export function toggleWorkoutReaction(store: AppStore, userId: ID, workoutId: ID, _kind: ReactionKind): Reaction[] {
   workoutForViewer(store, userId, workoutId);
   const existing = store.workoutReactions.find((item) => item.targetId === workoutId && item.userId === userId);
-  if (existing?.kind === kind) {
-    store.workoutReactions = store.workoutReactions.filter((item) => item.id !== existing.id);
+  if (existing?.kind === "cheer") {
+    store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
   } else {
     store.workoutReactions = store.workoutReactions.filter((item) => !(item.targetId === workoutId && item.userId === userId));
     store.workoutReactions.push({
       id: `workout_reaction_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      targetType: "workout", targetId: workoutId, userId, kind, createdAt: new Date().toISOString()
+      targetType: "workout", targetId: workoutId, userId, kind: "cheer", createdAt: new Date().toISOString()
     });
   }
-  return store.workoutReactions.filter((item) => item.targetId === workoutId);
+  return store.workoutReactions.filter((item) => item.targetId === workoutId && item.kind === "cheer");
 }
 
 export function workoutReactionsFor(store: AppStore, userId: ID, workoutId: ID): Reaction[] {
   workoutForViewer(store, userId, workoutId);
-  return store.workoutReactions.filter((item) => item.targetId === workoutId);
+  return store.workoutReactions.filter((item) => item.targetId === workoutId && item.kind === "cheer");
 }
 
 export function compareWorkouts(store: AppStore, userId: ID, firstId: ID, secondId: ID): WorkoutComparison {
