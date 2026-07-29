@@ -79,7 +79,7 @@ import { ProductionConfig, productionConfig } from "./config.js";
 import { exchangeGoogleAuthorizationCode, verifyGoogleIdentity } from "./auth.js";
 import type { PersistenceChange } from "./postgres.js";
 import type { PostgresRepository } from "./postgres.js";
-import { generateGeminiPlan } from "./gemini.js";
+import { generateGeminiPlan, generateGeminiSessionAnalysis } from "./gemini.js";
 import { error as logError, info, warn } from "./logger.js";
 
 const demoUserId = "u_ama";
@@ -222,16 +222,61 @@ export function createServer(
       const performanceAnalysisRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/analysis$/);
       const performanceGenerateRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/generate$/);
       const performanceCoachingDataRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/coaching-data$/);
+      const performanceQualifyingRunsRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/qualifying-runs$/);
+      const performanceBenchmarkRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/benchmark$/);
+      const performanceCheckInsRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/check-ins$/);
+      const performanceEvidenceRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/evidence$/);
+      const performanceEvaluateRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/evaluate$/);
+      const performanceAdaptationsRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/adaptations$/);
+      const performanceAdaptationActionRoute = url.pathname.match(/^\/performance-goals\/([^/]+)\/adaptations\/([^/]+)\/(accept|decline)$/);
       if (req.method === "GET" && performanceGoalRoute) {
         const result = await performanceGoals!.performanceGoalFor(userId, performanceGoalRoute[1]);
         return result ? json(res, 200, result) : json(res, 404, { error: "Performance goal not found" });
       }
       if (req.method === "PATCH" && performanceGoalRoute) {
-        const payload = await body<{ status: string }>(req);
-        return json(res, 200, await performanceGoals!.updatePerformanceGoalStatus(userId, performanceGoalRoute[1], payload.status));
+        return json(res, 200, await performanceGoals!.updatePerformanceGoal(userId, performanceGoalRoute[1], await body(req)));
       }
       if (req.method === "POST" && performanceAnalysisRoute) {
         return json(res, 200, await performanceGoals!.refreshPerformanceGoalAnalysis(userId, performanceAnalysisRoute[1]));
+      }
+      if (req.method === "GET" && performanceQualifyingRunsRoute) {
+        return json(res, 200, await performanceGoals!.qualifyingRunsFor(userId, performanceQualifyingRunsRoute[1]));
+      }
+      if (req.method === "POST" && performanceBenchmarkRoute) {
+        const payload = await body<{ workoutId: string }>(req);
+        return json(res, 200, await performanceGoals!.setCurrentPerformanceBenchmark(userId, performanceBenchmarkRoute[1], payload.workoutId));
+      }
+      if (req.method === "POST" && performanceCheckInsRoute) {
+        return json(res, 200, await performanceGoals!.checkInPerformanceRun(userId, performanceCheckInsRoute[1], await body(req)));
+      }
+      if (req.method === "GET" && performanceEvidenceRoute) {
+        return json(res, 200, await performanceGoals!.performanceEvidenceFor(userId, performanceEvidenceRoute[1]));
+      }
+      if (req.method === "POST" && performanceEvaluateRoute) {
+        const payload = await body<{ preparePlan?: boolean }>(req);
+        const adaptation = await performanceGoals!.evaluatePerformanceGoal(
+          userId, performanceEvaluateRoute[1], payload.preparePlan === false ? "weeklyReview" : "userRequested"
+        );
+        if (!adaptation) return json(res, 200, { adaptation: null });
+        if (adaptation.status === "recommended" && payload.preparePlan !== false) {
+          const detail = await performanceGoals!.performanceGoalFor(userId, performanceEvaluateRoute[1]);
+          if (!detail) return json(res, 404, { error: "Performance goal not found" });
+          const draft = await generateGeminiPlan(config, detail);
+          return json(res, 200, {
+            adaptation: await performanceGoals!.attachAdaptationDraft(userId, detail.goal.id, adaptation.id, draft)
+          });
+        }
+        return json(res, 200, { adaptation });
+      }
+      if (req.method === "GET" && performanceAdaptationsRoute) {
+        return json(res, 200, await performanceGoals!.adaptationsFor(userId, performanceAdaptationsRoute[1]));
+      }
+      if (req.method === "POST" && performanceAdaptationActionRoute) {
+        const [_, goalId, adaptationId, action] = performanceAdaptationActionRoute;
+        if (action === "accept") {
+          return json(res, 200, await performanceGoals!.acceptAdaptation(userId, goalId, adaptationId, config.geminiModel ?? "gemini-2.5-flash"));
+        }
+        return json(res, 200, await performanceGoals!.declineAdaptation(userId, goalId, adaptationId));
       }
       if (req.method === "POST" && performanceGenerateRoute) {
         const refreshed = await performanceGoals!.refreshPerformanceGoalAnalysis(userId, performanceGenerateRoute[1]);
@@ -255,8 +300,31 @@ export function createServer(
       }
 
       const trainingSessionRoute = url.pathname.match(/^\/training-sessions\/([^/]+)$/);
+      const trainingSessionWorkoutRoute = url.pathname.match(/^\/training-sessions\/([^/]+)\/link-workout$/);
+      const trainingSessionDetailRoute = url.pathname.match(/^\/training-sessions\/([^/]+)\/detail$/);
+      const trainingSessionAnalysisRoute = url.pathname.match(/^\/training-sessions\/([^/]+)\/analysis$/);
       if (req.method === "PATCH" && trainingSessionRoute) {
         return json(res, 200, await performanceGoals!.updateTrainingSession(userId, trainingSessionRoute[1], await body(req)));
+      }
+      if (req.method === "GET" && trainingSessionDetailRoute) {
+        return json(res, 200, await performanceGoals!.trainingSessionDetailFor(userId, trainingSessionDetailRoute[1]));
+      }
+      if (req.method === "POST" && trainingSessionAnalysisRoute) {
+        const context = await performanceGoals!.trainingSessionAnalysisContext(userId, trainingSessionAnalysisRoute[1]);
+        const result = await generateGeminiSessionAnalysis(config, context);
+        const workoutId = (context.result as { workoutId?: string } | undefined)?.workoutId
+          ?? (await performanceGoals!.trainingSessionDetailFor(userId, trainingSessionAnalysisRoute[1])).linkedWorkout?.id;
+        if (!workoutId) return json(res, 409, { error: "Link a run before requesting coaching analysis" });
+        return json(res, 200, await performanceGoals!.saveTrainingSessionAnalysis(
+          userId, trainingSessionAnalysisRoute[1], workoutId, config.geminiModel ?? "gemini-2.5-flash", result
+        ));
+      }
+      if (req.method === "POST" && trainingSessionWorkoutRoute) {
+        const payload = await body<{ workoutId: string }>(req);
+        return json(res, 200, await performanceGoals!.linkWorkoutToTrainingSession(userId, trainingSessionWorkoutRoute[1], payload.workoutId));
+      }
+      if (req.method === "DELETE" && trainingSessionWorkoutRoute) {
+        return json(res, 200, await performanceGoals!.unlinkWorkoutFromTrainingSession(userId, trainingSessionWorkoutRoute[1]));
       }
 
       if (req.method === "GET" && url.pathname === "/users/search") {
@@ -456,6 +524,9 @@ export function createServer(
         const payload = await body<{ workouts: Parameters<typeof upsertWorkouts>[2] }>(req);
         const result = upsertWorkouts(store, userId, payload.workouts ?? []);
         await onChange({ kind: "workouts", workoutIds: result.map((item) => item.id) });
+        if (performanceGoals && result.length > 0) {
+          await performanceGoals.evaluateNewPerformanceWorkouts(userId, result.map((item) => item.id));
+        }
         for (const challenge of challengesFor(store, userId)) await onChange({ kind: "challenge", challengeId: challenge.id });
         return json(res, 201, result);
       }

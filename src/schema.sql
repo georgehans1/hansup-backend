@@ -160,6 +160,8 @@ CREATE TABLE performance_goals (
   consent_version text NOT NULL,
   baseline_seconds integer,
   baseline_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL,
+  current_benchmark_seconds integer,
+  current_benchmark_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL,
   analysis jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
@@ -187,6 +189,7 @@ CREATE TABLE training_plans (
   gap_explanation text NOT NULL,
   recovery_guidance text NOT NULL,
   caution text NOT NULL,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded')),
   generated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(performance_goal_id, version)
 );
@@ -195,14 +198,75 @@ CREATE TABLE training_sessions (
   id text PRIMARY KEY,
   plan_id text NOT NULL REFERENCES training_plans(id) ON DELETE CASCADE,
   scheduled_date date NOT NULL,
-  type text NOT NULL,
+  type text NOT NULL CHECK (type IN ('easy','recovery','tempo','intervals','longRun','progression','timeTrial')),
   title text NOT NULL,
   purpose text NOT NULL,
   distance_meters double precision,
   duration_seconds integer,
+  target_pace_min_seconds_per_km integer,
+  target_pace_max_seconds_per_km integer,
+  pacing_guidance text,
   effort text NOT NULL,
-  status text NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'completed', 'skipped')),
-  linked_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL
+  status text NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'completed', 'partial', 'skipped', 'superseded')),
+  linked_workout_id text REFERENCES workout_summaries(id) ON DELETE SET NULL,
+  quality text CHECK (quality IN ('targetMet','completed','partial')),
+  match_confidence double precision
+);
+
+CREATE TABLE performance_goal_benchmarks (
+  id text PRIMARY KEY,
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  seconds integer NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('original','current')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(performance_goal_id, workout_id, kind)
+);
+
+CREATE TABLE performance_goal_evidence (
+  id text PRIMARY KEY,
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  training_session_id text REFERENCES training_sessions(id) ON DELETE SET NULL,
+  kind text NOT NULL CHECK (kind IN ('benchmark','session','relevantRun')),
+  match_status text NOT NULL CHECK (match_status IN ('automatic','confirmed','ambiguous','unmatched')),
+  quality text CHECK (quality IN ('targetMet','completed','partial')),
+  match_confidence double precision,
+  impact_summary text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(performance_goal_id, workout_id)
+);
+
+CREATE TABLE performance_run_checkins (
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  effort_feedback text CHECK (effort_feedback IN ('easy','onTarget','hard')),
+  note text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(performance_goal_id, workout_id)
+);
+
+CREATE TABLE performance_goal_adaptations (
+  id text PRIMARY KEY,
+  performance_goal_id text NOT NULL REFERENCES performance_goals(id) ON DELETE CASCADE,
+  reason text NOT NULL,
+  explanation text NOT NULL,
+  status text NOT NULL CHECK (status IN ('recommended','pending','accepted','declined','expired')),
+  proposed_plan jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  decided_at timestamptz
+);
+
+CREATE TABLE training_session_analyses (
+  id text PRIMARY KEY,
+  training_session_id text NOT NULL REFERENCES training_sessions(id) ON DELETE CASCADE,
+  workout_id text NOT NULL REFERENCES workout_summaries(id) ON DELETE CASCADE,
+  summary text NOT NULL,
+  observations jsonb NOT NULL DEFAULT '[]'::jsonb,
+  recommendation text NOT NULL,
+  model text NOT NULL,
+  generated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(training_session_id, workout_id)
 );
 
 CREATE TABLE coach_generations (
