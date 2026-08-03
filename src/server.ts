@@ -129,7 +129,7 @@ export function createServer(
         return json(res, 429, { error: "Too many requests. Try again shortly." });
       }
 
-      if (req.method === "GET" && url.pathname === "/health") {
+      if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/health") {
         return json(res, 200, { ok: true });
       }
 
