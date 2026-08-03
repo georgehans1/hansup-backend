@@ -89,6 +89,20 @@ CREATE TABLE workout_summaries (
   UNIQUE(user_id, healthkit_uuid)
 );
 
+CREATE INDEX workout_summaries_user_started_idx ON workout_summaries(user_id, started_at DESC);
+CREATE INDEX activity_summaries_user_date_idx ON activity_summaries(user_id, local_date DESC);
+
+CREATE TABLE activity_sync_batches (
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id text NOT NULL,
+  is_final boolean NOT NULL DEFAULT false,
+  acknowledgement jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(user_id, batch_id)
+);
+
+CREATE INDEX activity_sync_batches_user_created_idx ON activity_sync_batches(user_id, created_at DESC);
+
 CREATE TABLE workout_heart_rate_summaries (
   workout_id text PRIMARY KEY REFERENCES workout_summaries(id) ON DELETE CASCADE,
   average_bpm double precision NOT NULL,

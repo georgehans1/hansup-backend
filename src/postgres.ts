@@ -56,6 +56,7 @@ export type PersistenceChange =
   | { kind: "summary"; summaryId: string; userId: string }
   | { kind: "summary-batch"; summaryIds: string[]; userId: string }
   | { kind: "workouts"; workoutIds: string[] }
+  | { kind: "health-sync"; userId: string; batchId: string; summaryIds: string[]; workoutIds: string[]; deletedWorkoutIds: string[]; isFinalBatch: boolean; acknowledgement: Record<string, unknown> }
   | { kind: "goal"; goalId: string; userId: string }
   | { kind: "goal-delete"; goalId: string; userId: string }
   | { kind: "badges"; userId: string }
@@ -316,6 +317,23 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
           if (userId) await this.persistDerivedActivity(store, userId);
         }
         return;
+      case "health-sync":
+        for (const summaryId of change.summaryIds) {
+          await this.insertSummary(required(store.summaries.find((item) => item.id === summaryId), "Activity summary"));
+        }
+        for (const workoutId of change.workoutIds) {
+          await this.insertWorkout(required(store.workouts.find((item) => item.id === workoutId), "Workout summary"));
+        }
+        if (change.deletedWorkoutIds.length > 0) {
+          await this.query("delete from workout_summaries where user_id = $1 and id = any($2::text[])", [change.userId, change.deletedWorkoutIds]);
+        }
+        if (change.isFinalBatch) await this.persistDerivedActivity(store, change.userId);
+        await this.query(
+          `insert into activity_sync_batches (user_id,batch_id,is_final,acknowledgement,created_at)
+           values ($1,$2,$3,$4,now()) on conflict (user_id,batch_id) do nothing`,
+          [change.userId, change.batchId, change.isFinalBatch, JSON.stringify(change.acknowledgement)]
+        );
+        return;
       case "goal":
         await this.insertGoal(required(store.goals.find((item) => item.id === change.goalId), "Goal"));
         for (const version of store.goalVersions.filter((item) => item.goalId === change.goalId)) await this.insertGoalVersion(version);
@@ -439,6 +457,11 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
       summary.source
     ]);
     return mapSummary(result.rows[0]);
+  }
+
+  async healthSyncAcknowledgement(userId: string, batchId: string): Promise<Record<string, unknown> | undefined> {
+    const result = await this.query("select acknowledgement from activity_sync_batches where user_id = $1 and batch_id = $2", [userId, batchId]);
+    return result.rows[0]?.acknowledgement ?? undefined;
   }
 
   async getWorkoutHeartRate(workoutId: string): Promise<WorkoutHeartRateDetail | undefined> {
@@ -1484,6 +1507,15 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
           "create index if not exists challenge_comments_challenge_created_idx on challenge_comments(challenge_id,created_at desc)",
           "create table if not exists profile_highlights (id text primary key,user_id text not null references users(id) on delete cascade,kind text not null,entity_id text not null,position integer not null,created_at timestamptz not null default now(),unique(user_id,position),unique(user_id,kind,entity_id))"
         ]
+      },
+      {
+        id: "025_activity_sync_architecture",
+        statements: [
+          "create table if not exists activity_sync_batches (user_id text not null references users(id) on delete cascade,batch_id text not null,is_final boolean not null default false,acknowledgement jsonb not null default '{}'::jsonb,created_at timestamptz not null default now(),primary key(user_id,batch_id))",
+          "create index if not exists activity_summaries_user_date_idx on activity_summaries(user_id,local_date desc)",
+          "create index if not exists workout_summaries_user_started_idx on workout_summaries(user_id,started_at desc)",
+          "create index if not exists activity_sync_batches_user_created_idx on activity_sync_batches(user_id,created_at desc)"
+        ]
       }
     ];
     for (const migration of migrations) {
@@ -1497,7 +1529,8 @@ export class PostgresRepository implements WorkoutHeartRateRepository, WorkoutSp
 
   private async clearDomainTables() {
     await this.query(
-      `delete from message_reads;
+      `delete from activity_sync_batches;
+       delete from message_reads;
        delete from profile_highlights;
        delete from challenge_comments;
        delete from notifications;
