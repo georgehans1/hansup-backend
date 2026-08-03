@@ -111,6 +111,39 @@ export interface WorkoutSummary {
   source: "healthkit";
   trustLevel: "verified" | "review";
   updatedAt: string;
+  automaticTitle?: string;
+  customTitle?: string;
+  note?: string;
+  effortRating?: 1 | 2 | 3 | 4 | 5;
+  visibility?: "friends" | "private";
+}
+
+export interface WorkoutComparison {
+  first: WorkoutSummary;
+  second: WorkoutSummary;
+  compatible: boolean;
+  durationDeltaSeconds: number;
+  distanceDeltaMeters: number;
+  paceDeltaSecondsPerKm?: number;
+  calorieDelta: number;
+  summary: string[];
+}
+
+export interface ChallengeComment {
+  id: ID;
+  challengeId: ID;
+  userId: ID;
+  body: string;
+  createdAt: string;
+}
+
+export interface ProfileHighlight {
+  id: ID;
+  userId: ID;
+  kind: "badge" | "personalRecord" | "challenge" | "workout";
+  entityId: ID;
+  position: number;
+  createdAt: string;
 }
 
 export interface PerformanceGoalAnalysis {
@@ -381,6 +414,9 @@ export interface ChallengeParticipant {
   score: number;
   respondedAt?: string;
   teamId?: string;
+  eliminatedAt?: string;
+  livesRemaining?: number;
+  missedDays?: string[];
 }
 
 export interface Challenge {
@@ -392,12 +428,15 @@ export interface Challenge {
   startsOn: string;
   endsOn: string;
   status: ChallengeStatus;
-  mode?: "target" | "competitive" | "cooperative" | "team";
+  mode?: "target" | "competitive" | "cooperative" | "team" | "survivor";
   target?: number;
   participants: ChallengeParticipant[];
   rematchOfChallengeId?: ID;
   sharedConversationId?: ID;
   createdAt: string;
+  privateNote?: string;
+  survivorDailyTarget?: number;
+  survivorLives?: number;
 }
 
 export interface FeedItem {
@@ -406,13 +445,16 @@ export interface FeedItem {
   type: FeedItemType;
   title: string;
   body: string;
+  entityType?: "workout" | "badge" | "goal";
+  entityId?: ID;
+  metadata?: Record<string, string>;
   createdAt: string;
   reactions: Reaction[];
 }
 
 export interface Reaction {
   id: ID;
-  targetType: "feed" | "message";
+  targetType: "feed" | "message" | "workout";
   targetId: ID;
   userId: ID;
   kind: ReactionKind;
@@ -462,6 +504,24 @@ export interface WeeklyRecap {
   dayBars: Array<{ localDate: string; steps: number }>;
 }
 
+export interface MonthlyRecap {
+  month: string;
+  userId: ID;
+  isFinal: boolean;
+  totalSteps: number;
+  totalDistanceMeters: number;
+  walkingDistanceMeters: number;
+  runningDistanceMeters: number;
+  activeMinutes: number;
+  calories: number;
+  walkingWorkouts: number;
+  runningWorkouts: number;
+  strengthWorkouts: number;
+  activeDays: number;
+  bestDay?: { localDate: string; steps: number };
+  previousMonthTrendPercent: number;
+}
+
 export interface Badge {
   id: ID;
   title: string;
@@ -470,6 +530,46 @@ export interface Badge {
   threshold: number;
   category?: string;
   description?: string;
+  difficulty?: "bronze" | "silver" | "gold" | "elite" | "legendary";
+}
+
+export interface CircleTimelineEntry {
+  id: ID;
+  type: "workout" | "streakMilestone" | "badgeEarned";
+  user: PublicUserProfile;
+  createdAt: string;
+  title: string;
+  summary: string;
+  workout?: WorkoutSummary;
+  badge?: Badge;
+  streakCount?: number;
+  reactions: Reaction[];
+}
+
+export interface WorkoutInsightEvidence {
+  key: string;
+  label: string;
+  value: string;
+  splitIndex?: number;
+  category: "observed" | "interpretation" | "suggestion" | "limitation";
+}
+
+export interface WorkoutInsights {
+  workoutId: ID;
+  userId: ID;
+  activityType: "walking" | "running" | "strengthTraining";
+  headline: string;
+  overview: string;
+  positives: string[];
+  changes: string[];
+  suggestion: string;
+  evidence: WorkoutInsightEvidence[];
+  confidence: "limited" | "moderate" | "high";
+  limitations: string[];
+  sourceFingerprint: string;
+  engineVersion: string;
+  generatedAt: string;
+  updatedAt: string;
 }
 
 export interface BadgeProgress {

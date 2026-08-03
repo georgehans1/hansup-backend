@@ -22,7 +22,9 @@ import {
   conversationComparison,
   challengesFor,
   challengeCareerStats,
+  challengeHistoryBetween,
   challengeFor,
+  circleTimeline,
   conversationsFor,
   createConversation,
   createDemoStore,
@@ -65,9 +67,16 @@ import {
   upsertSummaries,
   upsertWorkouts,
   weeklyRecapFor,
+  monthlyRecapFor,
   workoutForViewer,
   workoutForExactViewer,
   summaryForViewer
+  ,updateWorkoutSocialMetadata
+  ,compareWorkouts
+  ,challengeCommentsFor
+  ,addChallengeComment
+  ,profileHighlightsFor
+  ,replaceProfileHighlights
 } from "./store.js";
 import { LeaderboardMetric, LeaderboardPeriod } from "./domain.js";
 import type { WorkoutHeartRatePoint } from "./domain.js";
@@ -357,6 +366,13 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/feed/friends") {
         return json(res, 200, friendActivity(store, userId, numberParam(url, "limit", 20), numberParam(url, "offset", 0)));
       }
+      if (req.method === "GET" && url.pathname === "/circle/timeline") {
+        return json(res, 200, circleTimeline(
+          store, userId, numberParam(url, "limit", 20),
+          url.searchParams.get("cursor") ?? undefined,
+          url.searchParams.get("type") ?? "all"
+        ));
+      }
 
       if (req.method === "GET" && url.pathname === "/activity/summaries") {
         return json(res, 200, activitySummariesFor(store, userId, url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined));
@@ -416,6 +432,18 @@ export function createServer(
         return json(res, 200, detail);
       }
       const workoutDetail = url.pathname.match(/^\/activities\/workouts\/([^/]+)$/);
+      const workoutInsights = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/insights$/);
+      if (workoutInsights) {
+        const workoutId = decodeURIComponent(workoutInsights[1]);
+        const workout = store.workouts.find((item) => item.id === workoutId);
+        if (!workout || workout.userId !== userId) throw new Error("Activity insights are available only to the activity owner");
+        if (!performanceGoals) return json(res, 503, { error: "Activity insights require PostgreSQL" });
+        if (req.method === "GET") return json(res, 200, { insights: await performanceGoals.workoutInsightsFor(userId, workoutId) ?? null });
+        if (req.method === "POST") {
+          const payload = await body<{ force?: boolean }>(req);
+          return json(res, 200, await performanceGoals.generateWorkoutInsights(userId, workoutId, payload.force === true));
+        }
+      }
       if (req.method === "GET" && workoutDetail) return json(res, 200, workoutForViewer(store, userId, decodeURIComponent(workoutDetail[1])));
       const summaryDetail = url.pathname.match(/^\/activities\/summaries\/([^/]+)$/);
       if (req.method === "GET" && summaryDetail) return json(res, 200, summaryForViewer(store, userId, decodeURIComponent(summaryDetail[1])));
@@ -648,12 +676,34 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/challenges/stats") {
         return json(res, 200, challengeCareerStats(store, userId));
       }
+      const friendChallengeHistory = url.pathname.match(/^\/friends\/([^/]+)\/challenge-history$/);
+      if (req.method === "GET" && friendChallengeHistory) return json(res, 200, challengeHistoryBetween(store, userId, friendChallengeHistory[1]));
+
+      const workoutSocial = url.pathname.match(/^\/activities\/workouts\/([^/]+)\/social$/);
+      if (req.method === "PATCH" && workoutSocial) {
+        const result = updateWorkoutSocialMetadata(store, userId, workoutSocial[1], await body(req));
+        await onChange({ kind: "workouts", workoutIds: [result.id] });
+        return json(res, 200, result);
+      }
+      if (req.method === "POST" && url.pathname === "/activities/workouts/compare") {
+        const payload = await body<{ firstId: string; secondId: string }>(req);
+        return json(res, 200, compareWorkouts(store, userId, payload.firstId, payload.secondId));
+      }
 
       const challengeDetail = url.pathname.match(/^\/challenges\/([^/]+)$/);
       if (req.method === "GET" && challengeDetail) {
         const result = challengeFor(store, userId, challengeDetail[1]);
         await onChange({ kind: "challenge", challengeId: result.id });
         return json(res, 200, result);
+      }
+
+      const challengeComments = url.pathname.match(/^\/challenges\/([^/]+)\/comments$/);
+      if (req.method === "GET" && challengeComments) return json(res, 200, challengeCommentsFor(store, userId, challengeComments[1]));
+      if (req.method === "POST" && challengeComments) {
+        const payload = await body<{ body: string }>(req);
+        const result = addChallengeComment(store, userId, challengeComments[1], payload.body);
+        await onChange({ kind: "challenge-comment", commentId: result.id });
+        return json(res, 201, result);
       }
 
       const challengeRespond = url.pathname.match(/^\/challenges\/([^/]+)\/respond$/);
@@ -688,6 +738,18 @@ export function createServer(
 
       if (req.method === "GET" && url.pathname === "/recaps/weekly") {
         return json(res, 200, weeklyRecapFor(store, userId));
+      }
+      if (req.method === "GET" && url.pathname === "/recaps/monthly") {
+        return json(res, 200, monthlyRecapFor(store, userId, url.searchParams.get("month") ?? undefined));
+      }
+
+      const profileHighlights = url.pathname.match(/^\/users\/([^/]+)\/highlights$/);
+      if (req.method === "GET" && profileHighlights) return json(res, 200, profileHighlightsFor(store, userId, profileHighlights[1]));
+      if (req.method === "PUT" && url.pathname === "/me/highlights") {
+        const payload = await body<{ items: Array<{ kind: "badge" | "personalRecord" | "challenge" | "workout"; entityId: string }> }>(req);
+        const result = replaceProfileHighlights(store, userId, payload.items);
+        await onChange({ kind: "profile-highlights", userId });
+        return json(res, 200, result);
       }
 
       if (req.method === "GET" && url.pathname === "/badges") {
