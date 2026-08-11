@@ -590,7 +590,7 @@ export function summaryForViewer(store: AppStore, viewerId: ID, summaryId: ID) {
   return summary;
 }
 
-export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>): WorkoutSummary[] {
+export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<WorkoutSummary, "id" | "userId" | "source" | "trustLevel" | "updatedAt">>, updateDerived = true): WorkoutSummary[] {
   const previousStreaks = goalStreakSnapshot(store, userId);
   const allowed = new Set(["walking", "running", "strengthTraining"]);
   const now = new Date().toISOString();
@@ -618,8 +618,10 @@ export function upsertWorkouts(store: AppStore, userId: ID, input: Array<Omit<Wo
     else store.workouts.push(saved);
     return saved;
   });
-  refreshDerived(store, userId);
-  emitGoalStreakMilestones(store, userId, previousStreaks);
+  if (updateDerived) {
+    refreshDerived(store, userId);
+    emitGoalStreakMilestones(store, userId, previousStreaks);
+  }
   return savedWorkouts;
 }
 
@@ -1200,12 +1202,17 @@ export function weeklyRecapFor(store: AppStore, userId: ID, weekStartsOn?: strin
 }
 
 export function monthlyRecapFor(store: AppStore, userId: ID, month?: string): MonthlyRecap {
-  const resolved = month && /^\d{4}-\d{2}$/.test(month) ? month : currentDateForUser(store, userId).slice(0, 7);
+  const today = currentDateForUser(store, userId);
+  const resolved = month && /^\d{4}-\d{2}$/.test(month) ? month : today.slice(0, 7);
   const previousDate = new Date(`${resolved}-01T12:00:00Z`);
   previousDate.setUTCMonth(previousDate.getUTCMonth() - 1);
   const previous = previousDate.toISOString().slice(0, 7);
   const summaries = store.summaries.filter((item) => item.userId === userId && item.localDate.startsWith(resolved));
-  const previousSummaries = store.summaries.filter((item) => item.userId === userId && item.localDate.startsWith(previous));
+  const isFinal = resolved < today.slice(0, 7);
+  const elapsedDay = Number(today.slice(8, 10));
+  const previousSummaries = store.summaries.filter((item) =>
+    item.userId === userId && item.localDate.startsWith(previous) && (isFinal || Number(item.localDate.slice(8, 10)) <= elapsedDay)
+  );
   const workouts = store.workouts.filter((item) => item.userId === userId && item.startedAt.slice(0, 7) === resolved);
   const totalSteps = summaries.reduce((sum, item) => sum + item.steps, 0);
   const previousSteps = previousSummaries.reduce((sum, item) => sum + item.steps, 0);
@@ -1213,7 +1220,7 @@ export function monthlyRecapFor(store: AppStore, userId: ID, month?: string): Mo
   return {
     month: resolved,
     userId,
-    isFinal: resolved < currentDateForUser(store, userId).slice(0, 7),
+    isFinal,
     totalSteps,
     totalDistanceMeters: summaries.reduce((sum, item) => sum + item.walkingDistanceMeters + item.runningDistanceMeters, 0),
     walkingDistanceMeters: summaries.reduce((sum, item) => sum + item.walkingDistanceMeters, 0),
@@ -1225,7 +1232,7 @@ export function monthlyRecapFor(store: AppStore, userId: ID, month?: string): Mo
     strengthWorkouts: workouts.filter((item) => item.activityType === "strengthTraining").length,
     activeDays: summaries.filter((item) => item.steps > 0 || item.workoutCount > 0 || item.activeMinutes > 0).length,
     bestDay: bestDay ? { localDate: bestDay.localDate, steps: bestDay.steps } : undefined,
-    previousMonthTrendPercent: previousSteps > 0 ? Math.round((totalSteps - previousSteps) / previousSteps * 100) : 0
+    previousMonthTrendPercent: previousSteps > 0 ? Math.round((totalSteps - previousSteps) / previousSteps * 1_000) / 10 : 0
   };
 }
 
@@ -1348,7 +1355,7 @@ export function lifetimePersonalBests(store: AppStore, userId: ID) {
 }
 
 function isStandaloneDistance(recordedMeters: number, targetMeters: number): boolean {
-  const tolerance = Math.min(Math.max(75, targetMeters * 0.03), 750);
+  const tolerance = Math.max(100, targetMeters * 0.05);
   return Math.abs(recordedMeters - targetMeters) <= tolerance;
 }
 
@@ -1413,7 +1420,7 @@ export function personalRecordLabFor(store: AppStore, viewerId: ID, userId: ID, 
 
   const standaloneDistances = [1_000, 2_000, 3_000, 4_000, 5_000, 10_000, 15_000, 21_097.5, 42_195];
   const standalone = standaloneDistances.map((distanceMeters) => {
-    const tolerance = Math.min(Math.max(75, distanceMeters * 0.03), 750);
+    const tolerance = Math.max(100, distanceMeters * 0.05);
     const attempts = runs
       .filter((workout) => Math.abs(workout.distanceMeters - distanceMeters) <= tolerance)
       .map((workout) => ({

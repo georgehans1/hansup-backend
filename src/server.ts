@@ -53,6 +53,7 @@ import {
   reactToMessage,
   rematchChallenge,
   removeFriend,
+  refreshDerivedForUser,
   refreshBadgesForUser,
   respondChallenge,
   respondFriendRequest,
@@ -128,7 +129,7 @@ export function createServer(
         return json(res, 429, { error: "Too many requests. Try again shortly." });
       }
 
-      if (req.method === "GET" && url.pathname === "/health") {
+      if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/health") {
         return json(res, 200, { ok: true });
       }
 
@@ -176,6 +177,30 @@ export function createServer(
 
       if (req.method === "POST" && url.pathname === "/auth/logout") {
         return json(res, 200, { ok: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/home/overview") {
+        const timelineLimit = Math.min(Math.max(numberParam(url, "timelineLimit", 10), 1), 20);
+        return json(res, 200, {
+          me: currentUser(store, userId),
+          friendActivity: friendActivity(store, userId, timelineLimit, 0),
+          activeChallenges: challengesFor(store, userId).filter((challenge) => challenge.status !== "completed").slice(0, 5),
+          unreadNotificationCount: unreadNotificationCount(store, userId),
+          serverTimestamp: new Date().toISOString()
+        });
+      }
+
+      if (req.method === "GET" && url.pathname === "/profile/overview") {
+        return json(res, 200, {
+          me: currentUser(store, userId),
+          activity: profileActivity(store, userId, userId, url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined),
+          weeklyRecap: weeklyRecapFor(store, userId),
+          monthlyRecap: monthlyRecapFor(store, userId),
+          aggregates: activityAggregatesFor(store, userId, Math.min(Math.max(numberParam(url, "weeks", 13), 1), 52)),
+          highlights: profileHighlightsFor(store, userId, userId),
+          badges: { badges: store.badges, userBadges: store.userBadges.filter((item) => item.userId === userId), progress: badgeProgressForUser(store, userId) },
+          serverTimestamp: new Date().toISOString()
+        });
       }
 
       if (req.method === "GET" && url.pathname === "/me") {
@@ -377,6 +402,13 @@ export function createServer(
       if (req.method === "GET" && url.pathname === "/activity/summaries") {
         return json(res, 200, activitySummariesFor(store, userId, url.searchParams.get("from") ?? undefined, url.searchParams.get("to") ?? undefined));
       }
+      if (req.method === "GET" && url.pathname === "/activity/overview") {
+        return json(res, 200, {
+          recentWorkouts: activityWorkoutsFor(store, userId, { limit: 10 }),
+          aggregates: activityAggregatesFor(store, userId, 13),
+          serverTimestamp: new Date().toISOString()
+        });
+      }
       if (req.method === "GET" && url.pathname === "/activity/workouts") {
         return json(res, 200, activityWorkoutsFor(store, userId, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, type: url.searchParams.get("type") ?? undefined, before: url.searchParams.get("before") ?? undefined, limit: numberParam(url, "limit", 50) }));
       }
@@ -557,6 +589,49 @@ export function createServer(
         }
         for (const challenge of challengesFor(store, userId)) await onChange({ kind: "challenge", challengeId: challenge.id });
         return json(res, 201, result);
+      }
+
+      if (req.method === "POST" && url.pathname === "/activity/sync") {
+        const payload = await body<{
+          batchId: string;
+          summaries?: Array<Omit<Parameters<typeof upsertSummary>[1], "userId">>;
+          workouts?: Parameters<typeof upsertWorkouts>[2];
+          deletedWorkoutUUIDs?: string[];
+          isFinalBatch?: boolean;
+        }>(req);
+        if (!payload.batchId?.trim()) throw new Error("A sync batch ID is required");
+        const previous = await performanceGoals?.healthSyncAcknowledgement(userId, payload.batchId);
+        if (previous) return json(res, 200, previous);
+
+        const summaryInputs = (payload.summaries ?? []).slice(0, 90).map((summary) => ({ ...summary, userId }));
+        const savedSummaries = upsertSummaries(store, summaryInputs, false);
+        const savedWorkouts = upsertWorkouts(store, userId, (payload.workouts ?? []).slice(0, 250), false);
+        const deletedUUIDs = new Set((payload.deletedWorkoutUUIDs ?? []).slice(0, 250));
+        const deletedWorkoutIds = store.workouts
+          .filter((workout) => workout.userId === userId && deletedUUIDs.has(workout.healthkitUUID))
+          .map((workout) => workout.id);
+        if (deletedWorkoutIds.length > 0) {
+          const deletedIds = new Set(deletedWorkoutIds);
+          store.workouts = store.workouts.filter((workout) => !deletedIds.has(workout.id));
+        }
+        if (payload.isFinalBatch) refreshDerivedForUser(store, userId);
+        const acknowledgement = {
+          acceptedSummaryKeys: savedSummaries.map((summary) => `${summary.userId}:${summary.localDate}`),
+          acceptedWorkoutUUIDs: savedWorkouts.map((workout) => workout.healthkitUUID),
+          acceptedDeletedWorkoutUUIDs: [...deletedUUIDs],
+          serverSyncedAt: new Date().toISOString(),
+          derivedRevision: `${userId}:${Date.now()}`
+        };
+        await onChange({
+          kind: "health-sync", userId, batchId: payload.batchId,
+          summaryIds: savedSummaries.map((summary) => summary.id), workoutIds: savedWorkouts.map((workout) => workout.id),
+          deletedWorkoutIds, isFinalBatch: payload.isFinalBatch === true, acknowledgement
+        });
+        if (performanceGoals && savedWorkouts.length > 0) {
+          await performanceGoals.evaluateNewPerformanceWorkouts(userId, savedWorkouts.map((workout) => workout.id));
+        }
+        info("health_sync_batch_saved", { requestId, userId, batchId: payload.batchId, summaries: savedSummaries.length, workouts: savedWorkouts.length, deleted: deletedWorkoutIds.length, final: payload.isFinalBatch === true });
+        return json(res, 201, acknowledgement);
       }
 
       if (req.method === "GET" && url.pathname === "/leaderboards/friends") {
