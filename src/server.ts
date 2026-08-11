@@ -404,7 +404,6 @@ export function createServer(
       }
       if (req.method === "GET" && url.pathname === "/activity/overview") {
         return json(res, 200, {
-          performanceGoals: performanceGoals ? await performanceGoals.performanceGoalsFor(userId) : [],
           recentWorkouts: activityWorkoutsFor(store, userId, { limit: 10 }),
           aggregates: activityAggregatesFor(store, userId, 13),
           serverTimestamp: new Date().toISOString()
