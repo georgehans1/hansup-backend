@@ -743,8 +743,18 @@ export function createServer(
       }
 
       if (req.method === "GET" && url.pathname === "/challenges") {
+        const before = new Map(
+          store.challenges
+            .filter((challenge) => challenge.participants.some((participant) => participant.userId === userId))
+            .map((challenge) => [challenge.id, JSON.stringify({ status: challenge.status, participants: challenge.participants })])
+        );
         const result = challengesFor(store, userId);
-        for (const challenge of result) await onChange({ kind: "challenge", challengeId: challenge.id });
+        for (const challenge of result) {
+          const current = JSON.stringify({ status: challenge.status, participants: challenge.participants });
+          if (before.get(challenge.id) !== current) {
+            await onChange({ kind: "challenge", challengeId: challenge.id });
+          }
+        }
         return json(res, 200, result);
       }
 
@@ -767,8 +777,13 @@ export function createServer(
 
       const challengeDetail = url.pathname.match(/^\/challenges\/([^/]+)$/);
       if (req.method === "GET" && challengeDetail) {
+        const stored = store.challenges.find((challenge) => challenge.id === challengeDetail[1]);
+        const before = stored
+          ? JSON.stringify({ status: stored.status, participants: stored.participants })
+          : undefined;
         const result = challengeFor(store, userId, challengeDetail[1]);
-        await onChange({ kind: "challenge", challengeId: result.id });
+        const current = JSON.stringify({ status: result.status, participants: result.participants });
+        if (before !== current) await onChange({ kind: "challenge", challengeId: result.id });
         return json(res, 200, result);
       }
 
